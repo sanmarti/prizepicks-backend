@@ -1,0 +1,12 @@
+{
+  "name": "prizepicks-common-layer",
+  "version": "1.0.0",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "jsonwebtoken": "^9.0.2",
+    "axios": "^1.6.7",
+    "bcryptjs": "^2.4.3",
+    "stripe": "^14.21.0",
+    "uuid": "^9.0.1"
+  }
+}

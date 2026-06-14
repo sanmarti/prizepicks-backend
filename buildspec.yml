@@ -1,0 +1,23 @@
+version: 0.2
+
+env:
+  variables:
+    ARTIFACTS_BUCKET: "prizepicks-artifacts-back-696715200075"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+  pre_build:
+    commands:
+      - cd layers/common && npm ci && cd ../..
+  build:
+    commands:
+      - sam build
+      - sam deploy
+          --no-confirm-changeset
+          --no-fail-on-empty-changeset
+          --stack-name prizepicks-backend-prod
+          --s3-bucket $ARTIFACTS_BUCKET
+          --region eu-west-3
+          --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM

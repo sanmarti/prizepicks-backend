@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: PrizePicks Backend - eu-west-3
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 15
+    Layers: [!Ref CommonLayer]
+    Environment:
+      Variables:
+        NODE_ENV: production
+        AWS_ACCOUNT_REGION: eu-west-3
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: prizepicks-common
+      ContentUri: layers/common/
+      CompatibleRuntimes: [nodejs20.x]
+      CompatibleArchitectures: [arm64]
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  PrizePicksApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: ["Authorization", "Content-Type"]
+        AllowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+      Auth:
+        DefaultAuthorizer: JwtAuthorizer
+        Authorizers:
+          JwtAuthorizer:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              Audience: ["prizepicks-app"]
+              Issuer: !Sub "https://cognito-idp.eu-west-3.amazonaws.com/PLACEHOLDER"
+
+  # --- AUTH (sin authorizer, pública) ---
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-auth-prod
+      CodeUri: functions/auth/
+      Handler: handler.handler
+      Events:
+        Register:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /auth/register
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        Login:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /auth/login
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  # --- LEAGUES ---
+  LeaguesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-leagues-prod
+      CodeUri: functions/leagues/
+      Handler: handler.handler
+      Events:
+        ListLeagues:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues
+            Method: GET
+        CreateLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues
+            Method: POST
+        GetLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}
+            Method: GET
+        UpdateLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}
+            Method: PUT
+        JoinLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/join/{code}
+            Method: POST
+        LeagueStandings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/standings
+            Method: GET
+
+  # --- GAMEWEEKS ---
+  GameweeksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-gameweeks-prod
+      CodeUri: functions/gameweeks/
+      Handler: handler.handler
+      Events:
+        ListGameweeks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /gameweeks
+            Method: GET
+        GetGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /gameweeks/{id}
+            Method: GET
+
+  # --- PICKS ---
+  PicksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-picks-prod
+      CodeUri: functions/picks/
+      Handler: handler.handler
+      Events:
+        SubmitPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /picks
+            Method: POST
+        GetPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /picks/{gameweekId}
+            Method: GET
+
+  # --- MATCHUPS ---
+  MatchupsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-matchups-prod
+      CodeUri: functions/matchups/
+      Handler: handler.handler
+      Events:
+        GetMatchup:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /matchups/{id}
+            Method: GET
+
+  # --- SCORING ---
+  ScoringFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-scoring-prod
+      CodeUri: functions/scoring/
+      Handler: handler.handler
+      Events:
+        Resolve:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /scoring/resolve
+            Method: POST
+
+  # --- ENERGY ---
+  EnergyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-energy-prod
+      CodeUri: functions/energy/
+      Handler: handler.handler
+      Events:
+        GetEnergy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /energy
+            Method: GET
+        BuyEnergy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /energy/buy
+            Method: POST
+
+  # --- ADMIN ---
+  AdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-admin-prod
+      CodeUri: functions/admin/
+      Handler: handler.handler
+      Events:
+        CreateGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweek
+            Method: POST
+        PublishGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/publish
+            Method: POST
+        ImportFixtures:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/fixtures
+            Method: GET
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${PrizePicksApi}.execute-api.eu-west-3.amazonaws.com/prod"
+    Export:
+      Name: PrizePicksApiUrl
