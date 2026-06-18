@@ -10,6 +10,12 @@ const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 exports.handler = async (event) => {
   const routeKey = event.routeKey
 
+  // Public route — no auth required
+  if (routeKey === "GET /competitions") {
+    try { return await listCompetitions() }
+    catch (err) { console.error(err); return error(500, "Internal server error") }
+  }
+
   let user
   try {
     user = await verifyToken(extractFromEvent(event))
@@ -20,12 +26,16 @@ exports.handler = async (event) => {
   if (user.role !== "admin") return error(403, "Admin only")
 
   try {
-    if (routeKey === "GET /admin/fixtures")  return await importFixtures(event)
-    if (routeKey === "POST /admin/gameweek") return await createGameweek(event)
-    if (routeKey === "POST /admin/publish")  return await publishGameweek(event)
-    if (routeKey === "GET /admin/users")     return await listUsers()
-    if (routeKey === "GET /admin/leagues")   return await listLeagues()
-    if (routeKey === "GET /admin/stats")     return await getStats()
+    if (routeKey === "GET /admin/fixtures")         return await importFixtures(event)
+    if (routeKey === "POST /admin/gameweek")        return await createGameweek(event)
+    if (routeKey === "POST /admin/publish")         return await publishGameweek(event)
+    if (routeKey === "GET /admin/users")            return await listUsers()
+    if (routeKey === "GET /admin/leagues")          return await listLeagues()
+    if (routeKey === "GET /admin/stats")            return await getStats()
+    if (routeKey === "GET /admin/competitions")     return await listCompetitions()
+    if (routeKey === "POST /admin/competitions")    return await createCompetition(event)
+    if (routeKey === "PUT /admin/competitions/{id}") return await updateCompetition(event)
+    if (routeKey === "DELETE /admin/competitions/{id}") return await deleteCompetition(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -178,4 +188,79 @@ async function publishGameweek(event) {
       )
   }
   return ok({ published: true, gameweek_id, matchupsCreated: matchups.length })
+}
+
+// ── Competitions ──────────────────────────────────────────────────────────────
+
+function computeStatus(startDate, endDate) {
+  const now = new Date()
+  const start = new Date(startDate)
+  const end = new Date(endDate)
+  if (now < start) return "FUTURE"
+  if (now > end) return "COMPLETED"
+  return "IN_PROGRESS"
+}
+
+async function listCompetitions() {
+  const pool = await getPool()
+  const { rows } = await pool.query(`
+    SELECT id, name, description, logo_url, cover_url,
+           start_date, end_date, num_weeks, created_at
+    FROM competitions ORDER BY start_date ASC
+  `)
+  return ok(rows.map(r => ({ ...r, status: computeStatus(r.start_date, r.end_date) })))
+}
+
+async function createCompetition(event) {
+  const body = JSON.parse(event.body || "{}")
+  const { name, description, logo_url, cover_url, start_date, end_date, num_weeks } = body
+  if (!name || !start_date || !end_date || !num_weeks)
+    return error(400, "name, start_date, end_date and num_weeks are required")
+  if (new Date(end_date) <= new Date(start_date))
+    return error(400, "end_date must be after start_date")
+
+  const pool = await getPool()
+  const id = uuidv4()
+  await pool.query(
+    `INSERT INTO competitions (id, name, description, logo_url, cover_url, start_date, end_date, num_weeks)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [id, name, description || null, logo_url || null, cover_url || null, start_date, end_date, num_weeks]
+  )
+  const { rows } = await pool.query("SELECT * FROM competitions WHERE id=$1", [id])
+  return ok({ ...rows[0], status: computeStatus(rows[0].start_date, rows[0].end_date) }, 201)
+}
+
+async function updateCompetition(event) {
+  const { id } = event.pathParameters
+  const body = JSON.parse(event.body || "{}")
+  const { name, description, logo_url, cover_url, start_date, end_date, num_weeks } = body
+
+  const pool = await getPool()
+  const existing = await pool.query("SELECT id FROM competitions WHERE id=$1", [id])
+  if (!existing.rows.length) return error(404, "Competition not found")
+
+  await pool.query(
+    `UPDATE competitions SET
+       name        = COALESCE($1, name),
+       description = COALESCE($2, description),
+       logo_url    = COALESCE($3, logo_url),
+       cover_url   = COALESCE($4, cover_url),
+       start_date  = COALESCE($5, start_date),
+       end_date    = COALESCE($6, end_date),
+       num_weeks   = COALESCE($7, num_weeks)
+     WHERE id = $8`,
+    [name || null, description || null, logo_url || null, cover_url || null,
+     start_date || null, end_date || null, num_weeks || null, id]
+  )
+  const { rows } = await pool.query("SELECT * FROM competitions WHERE id=$1", [id])
+  return ok({ ...rows[0], status: computeStatus(rows[0].start_date, rows[0].end_date) })
+}
+
+async function deleteCompetition(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+  const existing = await pool.query("SELECT id FROM competitions WHERE id=$1", [id])
+  if (!existing.rows.length) return error(404, "Competition not found")
+  await pool.query("DELETE FROM competitions WHERE id=$1", [id])
+  return ok({ deleted: true })
 }

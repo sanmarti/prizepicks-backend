@@ -33,6 +33,15 @@ Resources:
     Metadata:
       BuildMethod: nodejs20.x
 
+  PublicApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: ["Content-Type"]
+        AllowMethods: ["GET", "OPTIONS"]
+
   PrizePicksApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -245,9 +254,43 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/stats
             Method: GET
+        ListCompetitions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions
+            Method: GET
+        CreateCompetition:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions
+            Method: POST
+        UpdateCompetition:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/{id}
+            Method: PUT
+        DeleteCompetition:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/{id}
+            Method: DELETE
+        ListCompetitionsPublic:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PublicApi
+            Path: /competitions
+            Method: GET
 
 Outputs:
   ApiUrl:
     Value: !Sub "https://${PrizePicksApi}.execute-api.eu-west-3.amazonaws.com/prod"
     Export:
       Name: PrizePicksApiUrl
+  PublicApiUrl:
+    Value: !Sub "https://${PublicApi}.execute-api.eu-west-3.amazonaws.com/prod"
+    Export:
+      Name: PrizePicksPublicApiUrl
