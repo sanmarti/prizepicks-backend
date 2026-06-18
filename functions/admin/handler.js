@@ -89,13 +89,21 @@ async function getStats() {
 }
 
 async function importFixtures(event) {
-  const { leagueId, season, round } = event.queryStringParameters || {}
+  const { leagueId, season, round, next } = event.queryStringParameters || {}
   if (!leagueId || !season) return error(400, "leagueId and season are required")
   const secrets = await getSecrets()
+  const params = { league: leagueId, season, round }
+  if (next) params.next = next
   const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
-    params: { league: leagueId, season, round },
+    params,
     headers: { "x-apisports-key": secrets.key }
   })
+  // Surface API-Football plan errors to the client
+  const apiErrors = res.data?.errors
+  if (apiErrors && Object.keys(apiErrors).length > 0) {
+    const msg = Object.values(apiErrors).join(' ')
+    return error(402, msg)
+  }
   const fixtures = (res.data?.response || []).map(f => ({
     id: f.fixture.id, date: f.fixture.date,
     home: f.teams.home.name, away: f.teams.away.name,
@@ -114,17 +122,22 @@ function probToEnergyCost(prob) {
 
 async function createGameweek(event) {
   const body = JSON.parse(event.body || "{}")
-  const { league_id, week_number, lock_time, events: eventDefs } = body
-  if (!league_id || !week_number || !lock_time || !Array.isArray(eventDefs))
-    return error(400, "league_id, week_number, lock_time and events are required")
+  const { competition_id, week_number, lock_time, reveal_time, events: eventDefs } = body
+  if (!competition_id || !week_number || !lock_time || !Array.isArray(eventDefs))
+    return error(400, "competition_id, week_number, lock_time and events are required")
 
-  const secrets = await getSecrets()
   const pool = await getPool()
+
+  // Validate competition exists
+  const comp = await pool.query("SELECT id, name FROM competitions WHERE id=$1", [competition_id])
+  if (!comp.rows.length) return error(404, "Competition not found")
+
   const gwId = uuidv4()
 
   await pool.query(
-    `INSERT INTO gameweeks (id, league_id, week_number, lock_time, status) VALUES ($1,$2,$3,$4,'DRAFT')`,
-    [gwId, league_id, week_number, lock_time]
+    `INSERT INTO gameweeks (id, competition_id, week_number, lock_time, reveal_time, status)
+     VALUES ($1,$2,$3,$4,$5,'DRAFT')`,
+    [gwId, competition_id, week_number, lock_time, reveal_time || lock_time]
   )
 
   for (const evDef of eventDefs) {
@@ -135,22 +148,8 @@ async function createGameweek(event) {
       [eventId, gwId, evDef.event_type, evDef.fixture_id, evDef.fixture_name,
        evDef.player_name || null, evDef.competition || null, evDef.match_time || null]
     )
-    let odds = null
-    try {
-      const oddsRes = await axios.get(`${API_FOOTBALL_BASE}/odds`, {
-        params: { fixture: evDef.fixture_id, bookmaker: 1 },
-        headers: { "x-apisports-key": secrets.key }
-      })
-      odds = oddsRes.data?.response?.[0]?.bookmakers?.[0]?.bets || []
-    } catch (e) { console.error(`Odds fetch failed for ${evDef.fixture_id}:`, e.message) }
-
     for (const opt of (evDef.options || [])) {
-      let energyCost = opt.energy_cost
-      if (!energyCost && odds) {
-        const bet = odds.find(b => b.name === "Match Winner")
-        const outcome = bet?.values.find(v => v.value.toLowerCase() === opt.label.toLowerCase())
-        if (outcome) energyCost = probToEnergyCost(1 / parseFloat(outcome.odd))
-      }
+      const energyCost = opt.energy_cost
       if (!energyCost) continue
       await pool.query(
         "INSERT INTO event_options (id, event_id, label, energy_cost) VALUES ($1,$2,$3,$4)",
@@ -165,30 +164,52 @@ async function publishGameweek(event) {
   const { gameweek_id } = JSON.parse(event.body || "{}")
   if (!gameweek_id) return error(400, "gameweek_id is required")
   const pool = await getPool()
+
   const gwResult = await pool.query(
-    "SELECT id, league_id, week_number FROM gameweeks WHERE id=$1 AND status='DRAFT'",
+    "SELECT id, competition_id, week_number FROM gameweeks WHERE id=$1 AND status='DRAFT'",
     [gameweek_id]
   )
   if (!gwResult.rows.length) return error(404, "Gameweek not found or not DRAFT")
-  const { league_id, week_number } = gwResult.rows[0]
+  const { competition_id, week_number } = gwResult.rows[0]
+
   await pool.query("UPDATE gameweeks SET status='PUBLISHED' WHERE id=$1", [gameweek_id])
-  const members = (await pool.query(
-    "SELECT user_id FROM league_members WHERE league_id=$1 ORDER BY joined_at ASC", [league_id]
-  )).rows.map(r => r.user_id)
-  const n = members.length
-  const matchups = []
-  if (n >= 2) {
-    const offset = (week_number - 1) % Math.max(1, n - 1)
+
+  // Generate matchups for EVERY active league in this competition
+  const leaguesResult = await pool.query(
+    "SELECT id FROM leagues WHERE competition_id=$1 AND status='ACTIVE'",
+    [competition_id]
+  )
+
+  let totalMatchups = 0
+
+  for (const league of leaguesResult.rows) {
+    const members = (await pool.query(
+      "SELECT user_id FROM league_members WHERE league_id=$1 ORDER BY joined_at ASC",
+      [league.id]
+    )).rows.map(r => r.user_id)
+
+    const n = members.length
+    if (n < 2) continue
+
+    const offset  = (week_number - 1) % Math.max(1, n - 1)
     const rotated = [members[0], ...members.slice(1).map((_, i) => members[1 + (i + offset) % (n - 1)])]
-    for (let i = 0; i < Math.floor(n / 2); i++)
-      matchups.push({ home: rotated[i], away: rotated[n - 1 - i] })
-    for (const m of matchups)
+
+    for (let i = 0; i < Math.floor(n / 2); i++) {
       await pool.query(
-        `INSERT INTO matchups (id, gameweek_id, home_user_id, away_user_id, status) VALUES ($1,$2,$3,$4,'PENDING')`,
-        [uuidv4(), gameweek_id, m.home, m.away]
+        `INSERT INTO matchups (id, gameweek_id, home_user_id, away_user_id, status)
+         VALUES ($1,$2,$3,$4,'PENDING')`,
+        [uuidv4(), gameweek_id, rotated[i], rotated[n - 1 - i]]
       )
+      totalMatchups++
+    }
   }
-  return ok({ published: true, gameweek_id, matchupsCreated: matchups.length })
+
+  return ok({
+    published: true,
+    gameweek_id,
+    leagues_affected: leaguesResult.rows.length,
+    matchupsCreated: totalMatchups
+  })
 }
 
 // ── Odds ─────────────────────────────────────────────────────────────────────
