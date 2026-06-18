@@ -9,10 +9,14 @@ Globals:
     MemorySize: 256
     Timeout: 15
     Layers: [!Ref CommonLayer]
+    # Terraform-managed role with SSM read + CloudWatch permissions
+    Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
     Environment:
       Variables:
         NODE_ENV: production
         AWS_ACCOUNT_REGION: eu-west-3
+    # Each function ships the whole repo root so ../../shared/* resolves correctly
+    CodeUri: ./
 
 Parameters:
   Environment:
@@ -39,22 +43,13 @@ Resources:
         AllowOrigins: ["*"]
         AllowHeaders: ["Authorization", "Content-Type"]
         AllowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-      Auth:
-        DefaultAuthorizer: JwtAuthorizer
-        Authorizers:
-          JwtAuthorizer:
-            IdentitySource: $request.header.Authorization
-            JwtConfiguration:
-              Audience: ["prizepicks-app"]
-              Issuer: !Sub "https://cognito-idp.eu-west-3.amazonaws.com/PLACEHOLDER"
 
-  # --- AUTH (sin authorizer, pública) ---
+  # --- AUTH (public) ---
   AuthFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-auth-prod
-      CodeUri: functions/auth/
-      Handler: handler.handler
+      Handler: functions/auth/handler.handler
       Events:
         Register:
           Type: HttpApi
@@ -62,24 +57,19 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /auth/register
             Method: POST
-            Auth:
-              Authorizer: NONE
         Login:
           Type: HttpApi
           Properties:
             ApiId: !Ref PrizePicksApi
             Path: /auth/login
             Method: POST
-            Auth:
-              Authorizer: NONE
 
   # --- LEAGUES ---
   LeaguesFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-leagues-prod
-      CodeUri: functions/leagues/
-      Handler: handler.handler
+      Handler: functions/leagues/handler.handler
       Events:
         ListLeagues:
           Type: HttpApi
@@ -123,8 +113,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-gameweeks-prod
-      CodeUri: functions/gameweeks/
-      Handler: handler.handler
+      Handler: functions/gameweeks/handler.handler
       Events:
         ListGameweeks:
           Type: HttpApi
@@ -144,8 +133,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-picks-prod
-      CodeUri: functions/picks/
-      Handler: handler.handler
+      Handler: functions/picks/handler.handler
       Events:
         SubmitPicks:
           Type: HttpApi
@@ -165,8 +153,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-matchups-prod
-      CodeUri: functions/matchups/
-      Handler: handler.handler
+      Handler: functions/matchups/handler.handler
       Events:
         GetMatchup:
           Type: HttpApi
@@ -180,8 +167,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-scoring-prod
-      CodeUri: functions/scoring/
-      Handler: handler.handler
+      Handler: functions/scoring/handler.handler
       Events:
         Resolve:
           Type: HttpApi
@@ -195,8 +181,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-energy-prod
-      CodeUri: functions/energy/
-      Handler: handler.handler
+      Handler: functions/energy/handler.handler
       Events:
         GetEnergy:
           Type: HttpApi
@@ -216,8 +201,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-admin-prod
-      CodeUri: functions/admin/
-      Handler: handler.handler
+      Handler: functions/admin/handler.handler
       Events:
         CreateGameweek:
           Type: HttpApi
