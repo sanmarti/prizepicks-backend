@@ -32,6 +32,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/users")            return await listUsers()
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
+    if (routeKey === "GET /admin/odds")             return await getOddsForFixture(event)
     if (routeKey === "GET /admin/competitions")     return await listCompetitions()
     if (routeKey === "POST /admin/competitions")    return await createCompetition(event)
     if (routeKey === "PUT /admin/competitions/{id}") return await updateCompetition(event)
@@ -188,6 +189,45 @@ async function publishGameweek(event) {
       )
   }
   return ok({ published: true, gameweek_id, matchupsCreated: matchups.length })
+}
+
+// ── Odds ─────────────────────────────────────────────────────────────────────
+
+async function getOddsForFixture(event) {
+  const { fixture } = event.queryStringParameters || {}
+  if (!fixture) return error(400, "fixture query param required")
+
+  const secrets = await getSecrets()
+
+  try {
+    const res = await axios.get(`${API_FOOTBALL_BASE}/odds`, {
+      params: { fixture, bookmaker: 1 },
+      headers: { "x-apisports-key": secrets.key }
+    })
+
+    const bets = res.data?.response?.[0]?.bookmakers?.[0]?.bets ?? []
+    const mwBet    = bets.find(b => b.name === "Match Winner")
+    const goalsBet = bets.find(b => b.name === "Goals Over/Under")
+
+    const process = (values) => (values || []).map(v => {
+      const odd  = parseFloat(v.odd)
+      const prob = 1 / odd
+      return {
+        label:       v.value,
+        odd:         Math.round(odd * 100) / 100,
+        prob:        Math.round(prob * 1000) / 1000,
+        energy_cost: probToEnergyCost(prob),
+      }
+    })
+
+    return ok({
+      match_winner: process(mwBet?.values),
+      goals_ou:     process(goalsBet?.values),
+    })
+  } catch (err) {
+    console.error("Odds fetch failed:", err.message)
+    return ok({ match_winner: [], goals_ou: [] })
+  }
 }
 
 // ── Competitions ──────────────────────────────────────────────────────────────

@@ -254,6 +254,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/stats
             Method: GET
+        GetOdds:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/odds
+            Method: GET
         ListCompetitions:
           Type: HttpApi
           Properties:
