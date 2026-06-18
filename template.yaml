@@ -210,6 +210,33 @@ Resources:
             Path: /energy/buy
             Method: POST
 
+  # --- USERS / PROFILE ---
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-users-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
+      Handler: functions/users/handler.handler
+      Events:
+        GetProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /users/me
+            Method: GET
+        UpdateProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /users/me
+            Method: PUT
+        ChangePassword:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /users/me/password
+            Method: PUT
+
   # --- ADMIN ---
   AdminFunction:
     Type: AWS::Serverless::Function
