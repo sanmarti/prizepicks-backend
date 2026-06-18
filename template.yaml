@@ -9,8 +9,6 @@ Globals:
     MemorySize: 256
     Timeout: 15
     Layers: [!Ref CommonLayer]
-    # Terraform-managed role with SSM read + CloudWatch permissions
-    Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
     Environment:
       Variables:
         NODE_ENV: production
@@ -49,6 +47,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-auth-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/auth/handler.handler
       Events:
         Register:
@@ -69,6 +68,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-leagues-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/leagues/handler.handler
       Events:
         ListLeagues:
@@ -113,6 +113,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-gameweeks-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/gameweeks/handler.handler
       Events:
         ListGameweeks:
@@ -133,6 +134,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-picks-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/picks/handler.handler
       Events:
         SubmitPicks:
@@ -153,6 +155,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-matchups-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/matchups/handler.handler
       Events:
         GetMatchup:
@@ -167,6 +170,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-scoring-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/scoring/handler.handler
       Events:
         Resolve:
@@ -181,6 +185,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-energy-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/energy/handler.handler
       Events:
         GetEnergy:
@@ -201,6 +206,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: prizepicks-admin-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/admin/handler.handler
       Events:
         CreateGameweek:
