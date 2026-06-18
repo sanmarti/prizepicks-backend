@@ -60,6 +60,13 @@ async function updateProfile(event) {
     return error(400, 'Display name must be at least 2 characters')
   }
 
+  // avatar_url is a base64 data URL compressed client-side — cap at 250 KB
+  if (avatar_url !== undefined) {
+    if (typeof avatar_url !== 'string') return error(400, 'Invalid avatar')
+    if (avatar_url.length > 250 * 1024) return error(400, 'Avatar too large (max 250 KB)')
+    if (avatar_url !== '' && !avatar_url.startsWith('data:image/')) return error(400, 'Invalid avatar format')
+  }
+
   const pool = await getPool()
   const fields = []
   const vals   = []
