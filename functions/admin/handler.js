@@ -334,72 +334,162 @@ async function deleteCompetition(event) {
   return ok({ deleted: true })
 }
 
+const FINISHED_STATUSES = ['FT', 'AET', 'PEN', 'AWD', 'WO']
+const SIX_HOURS_MS = 6 * 60 * 60 * 1000
+
+function fixtureRowToShape(row) {
+  return {
+    id:             row.id,
+    date:           row.date,
+    status_short:   row.status_short,
+    status_long:    row.status_long,
+    status_elapsed: row.status_elapsed,
+    referee:        row.referee,
+    venue_name:     row.venue_name,
+    venue_city:     row.venue_city,
+    home:           row.home_team,
+    home_logo:      row.home_logo,
+    home_winner:    row.home_winner,
+    away:           row.away_team,
+    away_logo:      row.away_logo,
+    away_winner:    row.away_winner,
+    home_goals:     row.home_goals,
+    away_goals:     row.away_goals,
+    ht_home:        row.ht_home,
+    ht_away:        row.ht_away,
+    et_home:        row.et_home,
+    et_away:        row.et_away,
+    pen_home:       row.pen_home,
+    pen_away:       row.pen_away,
+    round:          row.round,
+  }
+}
+
+function apiFixtureToRow(f, competitionId) {
+  return {
+    id:             f.fixture.id,
+    competition_id: competitionId,
+    round:          f.league.round,
+    date:           f.fixture.date,
+    status_short:   f.fixture.status.short,
+    status_long:    f.fixture.status.long,
+    status_elapsed: f.fixture.status.elapsed ?? null,
+    referee:        f.fixture.referee ?? null,
+    venue_name:     f.fixture.venue?.name ?? null,
+    venue_city:     f.fixture.venue?.city ?? null,
+    home_team:      f.teams.home.name,
+    home_logo:      f.teams.home.logo,
+    home_winner:    f.teams.home.winner ?? null,
+    away_team:      f.teams.away.name,
+    away_logo:      f.teams.away.logo,
+    away_winner:    f.teams.away.winner ?? null,
+    home_goals:     f.goals.home ?? null,
+    away_goals:     f.goals.away ?? null,
+    ht_home:        f.score.halftime.home ?? null,
+    ht_away:        f.score.halftime.away ?? null,
+    et_home:        f.score.extratime?.home ?? null,
+    et_away:        f.score.extratime?.away ?? null,
+    pen_home:       f.score.penalty?.home ?? null,
+    pen_away:       f.score.penalty?.away ?? null,
+  }
+}
+
+async function upsertFixtures(pool, rows) {
+  for (const r of rows) {
+    await pool.query(`
+      INSERT INTO fixtures (
+        id, competition_id, round, date, status_short, status_long, status_elapsed,
+        referee, venue_name, venue_city,
+        home_team, home_logo, home_winner, away_team, away_logo, away_winner,
+        home_goals, away_goals, ht_home, ht_away, et_home, et_away, pen_home, pen_away,
+        updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+        $17,$18,$19,$20,$21,$22,$23,$24, NOW()
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        status_short=EXCLUDED.status_short, status_long=EXCLUDED.status_long,
+        status_elapsed=EXCLUDED.status_elapsed, home_winner=EXCLUDED.home_winner,
+        away_winner=EXCLUDED.away_winner, home_goals=EXCLUDED.home_goals,
+        away_goals=EXCLUDED.away_goals, ht_home=EXCLUDED.ht_home, ht_away=EXCLUDED.ht_away,
+        et_home=EXCLUDED.et_home, et_away=EXCLUDED.et_away,
+        pen_home=EXCLUDED.pen_home, pen_away=EXCLUDED.pen_away,
+        referee=EXCLUDED.referee, updated_at=NOW()
+      `, [
+        r.id, r.competition_id, r.round, r.date, r.status_short, r.status_long, r.status_elapsed,
+        r.referee, r.venue_name, r.venue_city,
+        r.home_team, r.home_logo, r.home_winner, r.away_team, r.away_logo, r.away_winner,
+        r.home_goals, r.away_goals, r.ht_home, r.ht_away, r.et_home, r.et_away, r.pen_home, r.pen_away,
+      ])
+  }
+}
+
+function groupIntoRounds(fixtures) {
+  const roundMap = {}
+  for (const f of fixtures) {
+    if (!roundMap[f.round]) roundMap[f.round] = []
+    roundMap[f.round].push(f)
+  }
+  return Object.entries(roundMap)
+    .map(([name, fxs]) => ({ name, fixtures: fxs.sort((a, b) => new Date(a.date) - new Date(b.date)) }))
+    .sort((a, b) => {
+      const numA = parseInt(a.name.match(/\d+/)?.[0] ?? '0')
+      const numB = parseInt(b.name.match(/\d+/)?.[0] ?? '0')
+      return numA - numB
+    })
+}
+
 async function getCompetitionCalendar(event) {
   const { id } = event.pathParameters
   const pool = await getPool()
 
   const comp = await pool.query(
-    "SELECT id, name, api_league_id, api_season FROM competitions WHERE id=$1",
-    [id]
+    "SELECT id, name, api_league_id, api_season FROM competitions WHERE id=$1", [id]
   )
   if (!comp.rows.length) return error(404, "Competition not found")
   const { api_league_id, api_season } = comp.rows[0]
   if (!api_league_id || !api_season)
     return error(422, "Competition has no API-Football league/season configured")
 
-  const secrets = await getSecrets()
-  const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
-    params: { league: api_league_id, season: api_season },
-    headers: { "x-apisports-key": secrets.key }
-  })
+  // Load what we have cached
+  const cached = await pool.query(
+    "SELECT * FROM fixtures WHERE competition_id=$1 ORDER BY date ASC", [id]
+  )
+  const cachedRows = cached.rows
 
-  const apiErrors = res.data?.errors
-  if (apiErrors && Object.keys(apiErrors).length > 0) {
-    return error(402, Object.values(apiErrors).join(' '))
+  // Decide which fixtures need a fresh API call:
+  // - finished fixtures are never re-fetched
+  // - non-finished fixtures are re-fetched if updated_at is older than 6h
+  const staleOrMissing = cachedRows.length === 0 ||
+    cachedRows.some(r =>
+      !FINISHED_STATUSES.includes(r.status_short) &&
+      (Date.now() - new Date(r.updated_at).getTime()) > SIX_HOURS_MS
+    )
+
+  if (staleOrMissing) {
+    const secrets = await getSecrets()
+    const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+      params: { league: api_league_id, season: api_season },
+      headers: { "x-apisports-key": secrets.key }
+    })
+    const apiErrors = res.data?.errors
+    if (apiErrors && Object.keys(apiErrors).length > 0)
+      return error(402, Object.values(apiErrors).join(' '))
+
+    const apiFixtures = res.data?.response || []
+    const rows = apiFixtures.map(f => apiFixtureToRow(f, id))
+    await upsertFixtures(pool, rows)
+
+    const shapes = rows.map(r => ({ ...fixtureRowToShape(r) }))
+    return ok({ rounds: groupIntoRounds(shapes), total_fixtures: shapes.length, source: 'api' })
   }
 
-  // Group fixtures by round
-  const roundMap = {}
-  for (const f of (res.data?.response || [])) {
-    const round = f.league.round
-    if (!roundMap[round]) roundMap[round] = []
-    roundMap[round].push({
-      id:              f.fixture.id,
-      date:            f.fixture.date,
-      status_short:    f.fixture.status.short,
-      status_long:     f.fixture.status.long,
-      status_elapsed:  f.fixture.status.elapsed,
-      referee:         f.fixture.referee ?? null,
-      venue_name:      f.fixture.venue?.name ?? null,
-      venue_city:      f.fixture.venue?.city ?? null,
-      home:            f.teams.home.name,
-      home_logo:       f.teams.home.logo,
-      home_winner:     f.teams.home.winner,
-      away:            f.teams.away.name,
-      away_logo:       f.teams.away.logo,
-      away_winner:     f.teams.away.winner,
-      home_goals:      f.goals.home,
-      away_goals:      f.goals.away,
-      ht_home:         f.score.halftime.home,
-      ht_away:         f.score.halftime.away,
-      et_home:         f.score.extratime?.home ?? null,
-      et_away:         f.score.extratime?.away ?? null,
-      pen_home:        f.score.penalty?.home ?? null,
-      pen_away:        f.score.penalty?.away ?? null,
-    })
-  }
-
-  const rounds = Object.entries(roundMap)
-    .map(([name, fixtures]) => ({ name, fixtures: fixtures.sort((a, b) => new Date(a.date) - new Date(b.date)) }))
-    .sort((a, b) => {
-      // Sort rounds numerically where possible (e.g. "Regular Season - 1" → 1)
-      const numA = parseInt(a.name.match(/\d+/)?.[0] ?? '0')
-      const numB = parseInt(b.name.match(/\d+/)?.[0] ?? '0')
-      return numA - numB
-    })
-
-  return ok({ rounds, total_fixtures: res.data?.response?.length ?? 0 })
+  // All data fresh from cache
+  const shapes = cachedRows.map(fixtureRowToShape)
+  return ok({ rounds: groupIntoRounds(shapes), total_fixtures: shapes.length, source: 'cache' })
 }
+
+const ONE_HOUR_MS = 60 * 60 * 1000
 
 async function getCompetitionStandings(event) {
   const { id } = event.pathParameters
@@ -412,6 +502,19 @@ async function getCompetitionStandings(event) {
   if (!api_league_id || !api_season)
     return error(422, "Competition has no API-Football league/season configured")
 
+  // Check cache freshness
+  const cached = await pool.query(
+    "SELECT * FROM competition_standings WHERE competition_id=$1 ORDER BY group_name, rank", [id]
+  )
+  if (cached.rows.length > 0) {
+    const age = Date.now() - new Date(cached.rows[0].updated_at).getTime()
+    if (age < ONE_HOUR_MS) {
+      const groups = buildStandingGroups(cached.rows)
+      return ok({ groups, source: 'cache' })
+    }
+  }
+
+  // Fetch fresh from API
   const secrets = await getSecrets()
   const res = await axios.get(`${API_FOOTBALL_BASE}/standings`, {
     params: { league: api_league_id, season: api_season },
@@ -425,30 +528,88 @@ async function getCompetitionStandings(event) {
   const leagueData = res.data?.response?.[0]?.league
   if (!leagueData) return ok({ groups: [] })
 
-  const groups = (leagueData.standings || []).map(group => ({
-    name: group[0]?.group ?? null,
-    rows: group.map(entry => ({
-      rank:        entry.rank,
-      team:        entry.team.name,
-      team_logo:   entry.team.logo,
-      points:      entry.points,
-      played:      entry.all.played,
-      win:         entry.all.win,
-      draw:        entry.all.draw,
-      lose:        entry.all.lose,
-      gf:          entry.all.goals.for,
-      ga:          entry.all.goals.against,
-      gd:          entry.goalsDiff,
-      form:        entry.form ?? null,
-      description: entry.description ?? null,
-    })),
-  }))
+  // Persist: delete old, insert fresh
+  await pool.query("DELETE FROM competition_standings WHERE competition_id=$1", [id])
+  for (const group of (leagueData.standings || [])) {
+    for (const entry of group) {
+      await pool.query(`
+        INSERT INTO competition_standings
+          (competition_id,group_name,rank,team,team_logo,points,played,win,draw,lose,gf,ga,gd,form,description,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())`,
+        [id, entry.group ?? null, entry.rank, entry.team.name, entry.team.logo,
+         entry.points, entry.all.played, entry.all.win, entry.all.draw, entry.all.lose,
+         entry.all.goals.for, entry.all.goals.against, entry.goalsDiff,
+         entry.form ?? null, entry.description ?? null]
+      )
+    }
+  }
 
-  return ok({ groups })
+  const fresh = await pool.query(
+    "SELECT * FROM competition_standings WHERE competition_id=$1 ORDER BY group_name, rank", [id]
+  )
+  return ok({ groups: buildStandingGroups(fresh.rows), source: 'api' })
+}
+
+function buildStandingGroups(rows) {
+  const map = {}
+  for (const r of rows) {
+    const key = r.group_name ?? ''
+    if (!map[key]) map[key] = []
+    map[key].push({
+      rank: r.rank, team: r.team, team_logo: r.team_logo,
+      points: r.points, played: r.played, win: r.win, draw: r.draw, lose: r.lose,
+      gf: r.gf, ga: r.ga, gd: r.gd, form: r.form, description: r.description,
+    })
+  }
+  return Object.entries(map).map(([name, rows]) => ({ name: name || null, rows }))
 }
 
 async function getFixtureDetails(event) {
   const { fixtureId } = event.pathParameters
+  const pool = await getPool()
+
+  // Check if we have cached details
+  const cached = await pool.query(
+    "SELECT details_cached, status_short FROM fixtures WHERE id=$1", [fixtureId]
+  )
+  const isFinished = cached.rows.length > 0 && FINISHED_STATUSES.includes(cached.rows[0].status_short)
+
+  if (cached.rows.length > 0 && cached.rows[0].details_cached) {
+    const [evRows, stRows, liRows] = await Promise.all([
+      pool.query("SELECT * FROM fixture_events WHERE fixture_id=$1 ORDER BY elapsed ASC, extra ASC NULLS LAST", [fixtureId]),
+      pool.query("SELECT * FROM fixture_statistics WHERE fixture_id=$1", [fixtureId]),
+      pool.query("SELECT * FROM fixture_lineups WHERE fixture_id=$1 ORDER BY is_substitute ASC, player_number ASC", [fixtureId]),
+    ])
+
+    const teamsEv = [...new Set(evRows.rows.map(r => r.team))]
+    const events = evRows.rows.map(r => ({
+      elapsed: r.elapsed, extra: r.extra, team: r.team, team_logo: r.team_logo,
+      player: r.player, assist: r.assist, type: r.type, detail: r.detail, comments: r.comments,
+    }))
+
+    const statsTeams = [...new Set(stRows.rows.map(r => r.team))]
+    const statistics = statsTeams.map(team => {
+      const teamRows = stRows.rows.filter(r => r.team === team)
+      return {
+        team, team_logo: teamRows[0]?.team_logo,
+        stats: teamRows.map(r => ({ type: r.stat_type, value: r.stat_value })),
+      }
+    })
+
+    const lineupTeams = [...new Set(liRows.rows.map(r => r.team))]
+    const lineups = lineupTeams.map(team => {
+      const tRows = liRows.rows.filter(r => r.team === team)
+      return {
+        team, team_logo: tRows[0]?.team_logo, formation: tRows[0]?.formation, coach: tRows[0]?.coach,
+        startXI:     tRows.filter(r => !r.is_substitute).map(p => ({ number: p.player_number, name: p.player_name, pos: p.player_pos, grid: p.player_grid })),
+        substitutes: tRows.filter(r =>  r.is_substitute).map(p => ({ number: p.player_number, name: p.player_name, pos: p.player_pos })),
+      }
+    })
+
+    return ok({ events, statistics, lineups, source: 'cache' })
+  }
+
+  // Fetch from API
   const secrets = await getSecrets()
   const headers = { "x-apisports-key": secrets.key }
 
@@ -459,37 +620,61 @@ async function getFixtureDetails(event) {
   ])
 
   const events = (eventsRes.data?.response || []).map(e => ({
-    elapsed:     e.time.elapsed,
-    extra:       e.time.extra ?? null,
-    team:        e.team.name,
-    team_logo:   e.team.logo,
-    player:      e.player.name,
-    assist:      e.assist?.name ?? null,
-    type:        e.type,
-    detail:      e.detail,
-    comments:    e.comments ?? null,
+    elapsed: e.time.elapsed, extra: e.time.extra ?? null,
+    team: e.team.name, team_logo: e.team.logo,
+    player: e.player.name, assist: e.assist?.name ?? null,
+    type: e.type, detail: e.detail, comments: e.comments ?? null,
   }))
 
   const statistics = (statsRes.data?.response || []).map(t => ({
-    team:      t.team.name,
-    team_logo: t.team.logo,
-    stats:     t.statistics.map(s => ({ type: s.type, value: s.value })),
+    team: t.team.name, team_logo: t.team.logo,
+    stats: t.statistics.map(s => ({ type: s.type, value: s.value })),
   }))
 
   const lineups = (lineupsRes.data?.response || []).map(t => ({
-    team:        t.team.name,
-    team_logo:   t.team.logo,
-    formation:   t.formation ?? null,
-    coach:       t.coach?.name ?? null,
-    startXI:     (t.startXI || []).map(p => ({
-      number: p.player.number, name: p.player.name, pos: p.player.pos, grid: p.player.grid
-    })),
-    substitutes: (t.substitutes || []).map(p => ({
-      number: p.player.number, name: p.player.name, pos: p.player.pos
-    })),
+    team: t.team.name, team_logo: t.team.logo,
+    formation: t.formation ?? null, coach: t.coach?.name ?? null,
+    startXI:     (t.startXI || []).map(p => ({ number: p.player.number, name: p.player.name, pos: p.player.pos, grid: p.player.grid })),
+    substitutes: (t.substitutes || []).map(p => ({ number: p.player.number, name: p.player.name, pos: p.player.pos })),
   }))
 
-  return ok({ events, statistics, lineups })
+  // Persist to cache if the match is finished
+  if (isFinished) {
+    for (const ev of events) {
+      await pool.query(
+        `INSERT INTO fixture_events (fixture_id,elapsed,extra,team,team_logo,player,assist,type,detail,comments)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [fixtureId, ev.elapsed, ev.extra, ev.team, ev.team_logo, ev.player, ev.assist, ev.type, ev.detail, ev.comments]
+      )
+    }
+    for (const t of statistics) {
+      for (const s of t.stats) {
+        await pool.query(
+          `INSERT INTO fixture_statistics (fixture_id,team,team_logo,stat_type,stat_value) VALUES ($1,$2,$3,$4,$5)`,
+          [fixtureId, t.team, t.team_logo, s.type, s.value]
+        )
+      }
+    }
+    for (const t of lineups) {
+      for (const p of t.startXI) {
+        await pool.query(
+          `INSERT INTO fixture_lineups (fixture_id,team,team_logo,formation,coach,is_substitute,player_number,player_name,player_pos,player_grid)
+           VALUES ($1,$2,$3,$4,$5,false,$6,$7,$8,$9)`,
+          [fixtureId, t.team, t.team_logo, t.formation, t.coach, p.number, p.name, p.pos, p.grid]
+        )
+      }
+      for (const p of t.substitutes) {
+        await pool.query(
+          `INSERT INTO fixture_lineups (fixture_id,team,team_logo,formation,coach,is_substitute,player_number,player_name,player_pos,player_grid)
+           VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,null)`,
+          [fixtureId, t.team, t.team_logo, t.formation, t.coach, p.number, p.name, p.pos]
+        )
+      }
+    }
+    await pool.query("UPDATE fixtures SET details_cached=true, updated_at=NOW() WHERE id=$1", [fixtureId])
+  }
+
+  return ok({ events, statistics, lineups, source: 'api' })
 }
 
 async function getCompetitionGameweeks(event) {
