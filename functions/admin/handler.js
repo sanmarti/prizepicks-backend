@@ -39,6 +39,7 @@ exports.handler = async (event) => {
     if (routeKey === "DELETE /admin/competitions/{id}")      return await deleteCompetition(event)
     if (routeKey === "GET /admin/competitions/{id}/calendar")   return await getCompetitionCalendar(event)
     if (routeKey === "GET /admin/competitions/{id}/gameweeks")  return await getCompetitionGameweeks(event)
+    if (routeKey === "GET /admin/fixtures/{fixtureId}/details") return await getFixtureDetails(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -362,16 +363,28 @@ async function getCompetitionCalendar(event) {
     const round = f.league.round
     if (!roundMap[round]) roundMap[round] = []
     roundMap[round].push({
-      id:          f.fixture.id,
-      date:        f.fixture.date,
-      status:      f.fixture.status.short,
-      home:        f.teams.home.name,
-      home_logo:   f.teams.home.logo,
-      away:        f.teams.away.name,
-      away_logo:   f.teams.away.logo,
-      home_goals:  f.goals.home,
-      away_goals:  f.goals.away,
-      venue:       f.fixture.venue?.name ?? null,
+      id:              f.fixture.id,
+      date:            f.fixture.date,
+      status_short:    f.fixture.status.short,
+      status_long:     f.fixture.status.long,
+      status_elapsed:  f.fixture.status.elapsed,
+      referee:         f.fixture.referee ?? null,
+      venue_name:      f.fixture.venue?.name ?? null,
+      venue_city:      f.fixture.venue?.city ?? null,
+      home:            f.teams.home.name,
+      home_logo:       f.teams.home.logo,
+      home_winner:     f.teams.home.winner,
+      away:            f.teams.away.name,
+      away_logo:       f.teams.away.logo,
+      away_winner:     f.teams.away.winner,
+      home_goals:      f.goals.home,
+      away_goals:      f.goals.away,
+      ht_home:         f.score.halftime.home,
+      ht_away:         f.score.halftime.away,
+      et_home:         f.score.extratime?.home ?? null,
+      et_away:         f.score.extratime?.away ?? null,
+      pen_home:        f.score.penalty?.home ?? null,
+      pen_away:        f.score.penalty?.away ?? null,
     })
   }
 
@@ -385,6 +398,51 @@ async function getCompetitionCalendar(event) {
     })
 
   return ok({ rounds, total_fixtures: res.data?.response?.length ?? 0 })
+}
+
+async function getFixtureDetails(event) {
+  const { fixtureId } = event.pathParameters
+  const secrets = await getSecrets()
+  const headers = { "x-apisports-key": secrets.key }
+
+  const [eventsRes, statsRes, lineupsRes] = await Promise.all([
+    axios.get(`${API_FOOTBALL_BASE}/fixtures/events`,     { params: { fixture: fixtureId }, headers }),
+    axios.get(`${API_FOOTBALL_BASE}/fixtures/statistics`, { params: { fixture: fixtureId }, headers }),
+    axios.get(`${API_FOOTBALL_BASE}/fixtures/lineups`,    { params: { fixture: fixtureId }, headers }),
+  ])
+
+  const events = (eventsRes.data?.response || []).map(e => ({
+    elapsed:     e.time.elapsed,
+    extra:       e.time.extra ?? null,
+    team:        e.team.name,
+    team_logo:   e.team.logo,
+    player:      e.player.name,
+    assist:      e.assist?.name ?? null,
+    type:        e.type,
+    detail:      e.detail,
+    comments:    e.comments ?? null,
+  }))
+
+  const statistics = (statsRes.data?.response || []).map(t => ({
+    team:      t.team.name,
+    team_logo: t.team.logo,
+    stats:     t.statistics.map(s => ({ type: s.type, value: s.value })),
+  }))
+
+  const lineups = (lineupsRes.data?.response || []).map(t => ({
+    team:        t.team.name,
+    team_logo:   t.team.logo,
+    formation:   t.formation ?? null,
+    coach:       t.coach?.name ?? null,
+    startXI:     (t.startXI || []).map(p => ({
+      number: p.player.number, name: p.player.name, pos: p.player.pos, grid: p.player.grid
+    })),
+    substitutes: (t.substitutes || []).map(p => ({
+      number: p.player.number, name: p.player.name, pos: p.player.pos
+    })),
+  }))
+
+  return ok({ events, statistics, lineups })
 }
 
 async function getCompetitionGameweeks(event) {
