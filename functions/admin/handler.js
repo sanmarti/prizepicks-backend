@@ -39,6 +39,7 @@ exports.handler = async (event) => {
     if (routeKey === "DELETE /admin/competitions/{id}")      return await deleteCompetition(event)
     if (routeKey === "GET /admin/competitions/{id}/calendar")   return await getCompetitionCalendar(event)
     if (routeKey === "GET /admin/competitions/{id}/gameweeks")  return await getCompetitionGameweeks(event)
+    if (routeKey === "GET /admin/competitions/{id}/standings")  return await getCompetitionStandings(event)
     if (routeKey === "GET /admin/fixtures/{fixtureId}/details") return await getFixtureDetails(event)
     return error(404, "Not found")
   } catch (err) {
@@ -398,6 +399,52 @@ async function getCompetitionCalendar(event) {
     })
 
   return ok({ rounds, total_fixtures: res.data?.response?.length ?? 0 })
+}
+
+async function getCompetitionStandings(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+  const comp = await pool.query(
+    "SELECT api_league_id, api_season FROM competitions WHERE id=$1", [id]
+  )
+  if (!comp.rows.length) return error(404, "Competition not found")
+  const { api_league_id, api_season } = comp.rows[0]
+  if (!api_league_id || !api_season)
+    return error(422, "Competition has no API-Football league/season configured")
+
+  const secrets = await getSecrets()
+  const res = await axios.get(`${API_FOOTBALL_BASE}/standings`, {
+    params: { league: api_league_id, season: api_season },
+    headers: { "x-apisports-key": secrets.key }
+  })
+
+  const apiErrors = res.data?.errors
+  if (apiErrors && Object.keys(apiErrors).length > 0)
+    return error(402, Object.values(apiErrors).join(' '))
+
+  const leagueData = res.data?.response?.[0]?.league
+  if (!leagueData) return ok({ groups: [] })
+
+  const groups = (leagueData.standings || []).map(group => ({
+    name: group[0]?.group ?? null,
+    rows: group.map(entry => ({
+      rank:        entry.rank,
+      team:        entry.team.name,
+      team_logo:   entry.team.logo,
+      points:      entry.points,
+      played:      entry.all.played,
+      win:         entry.all.win,
+      draw:        entry.all.draw,
+      lose:        entry.all.lose,
+      gf:          entry.all.goals.for,
+      ga:          entry.all.goals.against,
+      gd:          entry.goalsDiff,
+      form:        entry.form ?? null,
+      description: entry.description ?? null,
+    })),
+  }))
+
+  return ok({ groups })
 }
 
 async function getFixtureDetails(event) {

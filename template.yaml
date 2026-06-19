@@ -323,6 +323,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/competitions/{id}/gameweeks
             Method: GET
+        GetCompetitionStandings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/{id}/standings
+            Method: GET
         GetFixtureDetails:
           Type: HttpApi
           Properties:
