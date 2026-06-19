@@ -33,10 +33,11 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
     if (routeKey === "GET /admin/odds")             return await getOddsForFixture(event)
-    if (routeKey === "GET /admin/competitions")     return await listCompetitions()
-    if (routeKey === "POST /admin/competitions")    return await createCompetition(event)
-    if (routeKey === "PUT /admin/competitions/{id}") return await updateCompetition(event)
-    if (routeKey === "DELETE /admin/competitions/{id}") return await deleteCompetition(event)
+    if (routeKey === "GET /admin/competitions")              return await listCompetitions()
+    if (routeKey === "POST /admin/competitions")             return await createCompetition(event)
+    if (routeKey === "PUT /admin/competitions/{id}")         return await updateCompetition(event)
+    if (routeKey === "DELETE /admin/competitions/{id}")      return await deleteCompetition(event)
+    if (routeKey === "GET /admin/competitions/{id}/calendar") return await getCompetitionCalendar(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -266,7 +267,7 @@ async function listCompetitions() {
   const pool = await getPool()
   const { rows } = await pool.query(`
     SELECT id, name, description, logo_url, cover_url,
-           start_date, end_date, num_weeks, created_at
+           start_date, end_date, num_weeks, api_league_id, api_season, created_at
     FROM competitions ORDER BY start_date ASC
   `)
   return ok(rows.map(r => ({ ...r, status: computeStatus(r.start_date, r.end_date) })))
@@ -274,7 +275,7 @@ async function listCompetitions() {
 
 async function createCompetition(event) {
   const body = JSON.parse(event.body || "{}")
-  const { name, description, logo_url, cover_url, start_date, end_date, num_weeks } = body
+  const { name, description, logo_url, cover_url, start_date, end_date, num_weeks, api_league_id, api_season } = body
   if (!name || !start_date || !end_date || !num_weeks)
     return error(400, "name, start_date, end_date and num_weeks are required")
   if (new Date(end_date) <= new Date(start_date))
@@ -283,9 +284,10 @@ async function createCompetition(event) {
   const pool = await getPool()
   const id = uuidv4()
   await pool.query(
-    `INSERT INTO competitions (id, name, description, logo_url, cover_url, start_date, end_date, num_weeks)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [id, name, description || null, logo_url || null, cover_url || null, start_date, end_date, num_weeks]
+    `INSERT INTO competitions (id, name, description, logo_url, cover_url, start_date, end_date, num_weeks, api_league_id, api_season)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [id, name, description || null, logo_url || null, cover_url || null, start_date, end_date, num_weeks,
+     api_league_id || null, api_season || null]
   )
   const { rows } = await pool.query("SELECT * FROM competitions WHERE id=$1", [id])
   return ok({ ...rows[0], status: computeStatus(rows[0].start_date, rows[0].end_date) }, 201)
@@ -294,7 +296,7 @@ async function createCompetition(event) {
 async function updateCompetition(event) {
   const { id } = event.pathParameters
   const body = JSON.parse(event.body || "{}")
-  const { name, description, logo_url, cover_url, start_date, end_date, num_weeks } = body
+  const { name, description, logo_url, cover_url, start_date, end_date, num_weeks, api_league_id, api_season } = body
 
   const pool = await getPool()
   const existing = await pool.query("SELECT id FROM competitions WHERE id=$1", [id])
@@ -302,16 +304,19 @@ async function updateCompetition(event) {
 
   await pool.query(
     `UPDATE competitions SET
-       name        = COALESCE($1, name),
-       description = COALESCE($2, description),
-       logo_url    = COALESCE($3, logo_url),
-       cover_url   = COALESCE($4, cover_url),
-       start_date  = COALESCE($5, start_date),
-       end_date    = COALESCE($6, end_date),
-       num_weeks   = COALESCE($7, num_weeks)
-     WHERE id = $8`,
+       name          = COALESCE($1, name),
+       description   = COALESCE($2, description),
+       logo_url      = COALESCE($3, logo_url),
+       cover_url     = COALESCE($4, cover_url),
+       start_date    = COALESCE($5, start_date),
+       end_date      = COALESCE($6, end_date),
+       num_weeks     = COALESCE($7, num_weeks),
+       api_league_id = COALESCE($8, api_league_id),
+       api_season    = COALESCE($9, api_season)
+     WHERE id = $10`,
     [name || null, description || null, logo_url || null, cover_url || null,
-     start_date || null, end_date || null, num_weeks || null, id]
+     start_date || null, end_date || null, num_weeks || null,
+     api_league_id || null, api_season || null, id]
   )
   const { rows } = await pool.query("SELECT * FROM competitions WHERE id=$1", [id])
   return ok({ ...rows[0], status: computeStatus(rows[0].start_date, rows[0].end_date) })
@@ -324,4 +329,59 @@ async function deleteCompetition(event) {
   if (!existing.rows.length) return error(404, "Competition not found")
   await pool.query("DELETE FROM competitions WHERE id=$1", [id])
   return ok({ deleted: true })
+}
+
+async function getCompetitionCalendar(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  const comp = await pool.query(
+    "SELECT id, name, api_league_id, api_season FROM competitions WHERE id=$1",
+    [id]
+  )
+  if (!comp.rows.length) return error(404, "Competition not found")
+  const { api_league_id, api_season } = comp.rows[0]
+  if (!api_league_id || !api_season)
+    return error(422, "Competition has no API-Football league/season configured")
+
+  const secrets = await getSecrets()
+  const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+    params: { league: api_league_id, season: api_season },
+    headers: { "x-apisports-key": secrets.key }
+  })
+
+  const apiErrors = res.data?.errors
+  if (apiErrors && Object.keys(apiErrors).length > 0) {
+    return error(402, Object.values(apiErrors).join(' '))
+  }
+
+  // Group fixtures by round
+  const roundMap = {}
+  for (const f of (res.data?.response || [])) {
+    const round = f.league.round
+    if (!roundMap[round]) roundMap[round] = []
+    roundMap[round].push({
+      id:          f.fixture.id,
+      date:        f.fixture.date,
+      status:      f.fixture.status.short,
+      home:        f.teams.home.name,
+      home_logo:   f.teams.home.logo,
+      away:        f.teams.away.name,
+      away_logo:   f.teams.away.logo,
+      home_goals:  f.goals.home,
+      away_goals:  f.goals.away,
+      venue:       f.fixture.venue?.name ?? null,
+    })
+  }
+
+  const rounds = Object.entries(roundMap)
+    .map(([name, fixtures]) => ({ name, fixtures: fixtures.sort((a, b) => new Date(a.date) - new Date(b.date)) }))
+    .sort((a, b) => {
+      // Sort rounds numerically where possible (e.g. "Regular Season - 1" → 1)
+      const numA = parseInt(a.name.match(/\d+/)?.[0] ?? '0')
+      const numB = parseInt(b.name.match(/\d+/)?.[0] ?? '0')
+      return numA - numB
+    })
+
+  return ok({ rounds, total_fixtures: res.data?.response?.length ?? 0 })
 }

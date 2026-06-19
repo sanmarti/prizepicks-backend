@@ -311,6 +311,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/competitions/{id}
             Method: DELETE
+        GetCompetitionCalendar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/{id}/calendar
+            Method: GET
         ListCompetitionsPublic:
           Type: HttpApi
           Properties:
