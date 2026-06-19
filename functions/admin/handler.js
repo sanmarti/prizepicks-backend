@@ -37,7 +37,8 @@ exports.handler = async (event) => {
     if (routeKey === "POST /admin/competitions")             return await createCompetition(event)
     if (routeKey === "PUT /admin/competitions/{id}")         return await updateCompetition(event)
     if (routeKey === "DELETE /admin/competitions/{id}")      return await deleteCompetition(event)
-    if (routeKey === "GET /admin/competitions/{id}/calendar") return await getCompetitionCalendar(event)
+    if (routeKey === "GET /admin/competitions/{id}/calendar")   return await getCompetitionCalendar(event)
+    if (routeKey === "GET /admin/competitions/{id}/gameweeks")  return await getCompetitionGameweeks(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -384,4 +385,22 @@ async function getCompetitionCalendar(event) {
     })
 
   return ok({ rounds, total_fixtures: res.data?.response?.length ?? 0 })
+}
+
+async function getCompetitionGameweeks(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+  const { rows } = await pool.query(`
+    SELECT
+      g.id, g.week_number, g.lock_time, g.reveal_time, g.status, g.created_at,
+      COUNT(DISTINCT e.id)::int   AS event_count,
+      COUNT(DISTINCT m.id)::int   AS matchup_count
+    FROM gameweeks g
+    LEFT JOIN events e  ON e.gameweek_id = g.id
+    LEFT JOIN matchups m ON m.gameweek_id = g.id
+    WHERE g.competition_id = $1
+    GROUP BY g.id
+    ORDER BY g.week_number ASC
+  `, [id])
+  return ok(rows)
 }
