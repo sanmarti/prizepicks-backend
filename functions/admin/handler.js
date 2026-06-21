@@ -28,6 +28,8 @@ exports.handler = async (event) => {
   try {
     if (routeKey === "GET /admin/fixtures")         return await importFixtures(event)
     if (routeKey === "POST /admin/gameweek")        return await createGameweek(event)
+    if (routeKey === "GET /admin/gameweek/{id}")    return await getGameweek(event)
+    if (routeKey === "PUT /admin/gameweek/{id}")    return await updateGameweek(event)
     if (routeKey === "POST /admin/publish")         return await publishGameweek(event)
     if (routeKey === "GET /admin/users")            return await listUsers()
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
@@ -162,6 +164,79 @@ async function createGameweek(event) {
     }
   }
   return ok({ gameweekId: gwId }, 201)
+}
+
+async function getGameweek(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+  const gw = await pool.query("SELECT * FROM gameweeks WHERE id=$1", [id])
+  if (!gw.rows.length) return error(404, "Gameweek not found")
+
+  const events = await pool.query(
+    "SELECT * FROM events WHERE gameweek_id=$1 ORDER BY match_time ASC", [id]
+  )
+  const options = await pool.query(
+    `SELECT eo.* FROM event_options eo
+     JOIN events e ON e.id = eo.event_id
+     WHERE e.gameweek_id=$1`, [id]
+  )
+
+  const optsByEvent = {}
+  for (const o of options.rows) {
+    if (!optsByEvent[o.event_id]) optsByEvent[o.event_id] = []
+    optsByEvent[o.event_id].push({ label: o.label, energy_cost: o.energy_cost })
+  }
+
+  return ok({
+    ...gw.rows[0],
+    events: events.rows.map(e => ({
+      ...e,
+      options: optsByEvent[e.id] ?? [],
+    })),
+  })
+}
+
+async function updateGameweek(event) {
+  const { id } = event.pathParameters
+  const body = JSON.parse(event.body || "{}")
+  const { week_number, lock_time, reveal_time, events: eventDefs } = body
+  if (!week_number || !lock_time || !Array.isArray(eventDefs))
+    return error(400, "week_number, lock_time and events are required")
+
+  const pool = await getPool()
+  const gw = await pool.query("SELECT id FROM gameweeks WHERE id=$1 AND status='DRAFT'", [id])
+  if (!gw.rows.length) return error(404, "Gameweek not found or not editable")
+
+  // Update gameweek meta
+  await pool.query(
+    "UPDATE gameweeks SET week_number=$1, lock_time=$2, reveal_time=$3 WHERE id=$4",
+    [week_number, lock_time, reveal_time || lock_time, id]
+  )
+
+  // Replace all events and options
+  const existingEvents = await pool.query("SELECT id FROM events WHERE gameweek_id=$1", [id])
+  for (const ev of existingEvents.rows) {
+    await pool.query("DELETE FROM event_options WHERE event_id=$1", [ev.id])
+  }
+  await pool.query("DELETE FROM events WHERE gameweek_id=$1", [id])
+
+  for (const evDef of eventDefs) {
+    const eventId = uuidv4()
+    await pool.query(
+      `INSERT INTO events (id, gameweek_id, event_type, fixture_id, fixture_name, player_name, competition, match_time)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [eventId, id, evDef.event_type, evDef.fixture_id, evDef.fixture_name,
+       evDef.player_name || null, evDef.competition || null, evDef.match_time || null]
+    )
+    for (const opt of (evDef.options || [])) {
+      if (!opt.energy_cost) continue
+      await pool.query(
+        "INSERT INTO event_options (id, event_id, label, energy_cost) VALUES ($1,$2,$3,$4)",
+        [uuidv4(), eventId, opt.label, opt.energy_cost]
+      )
+    }
+  }
+  return ok({ gameweekId: id })
 }
 
 async function publishGameweek(event) {

@@ -251,6 +251,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/gameweek
             Method: POST
+        GetGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweek/{id}
+            Method: GET
+        UpdateGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweek/{id}
+            Method: PUT
         PublishGameweek:
           Type: HttpApi
           Properties:
