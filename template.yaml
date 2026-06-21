@@ -353,6 +353,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/fixtures/available
             Method: GET
+        ImportFixturesByRange:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/fixtures/import-range
+            Method: POST
         # 6 to Glory – Divisions
         ListDivisions:
           Type: HttpApi

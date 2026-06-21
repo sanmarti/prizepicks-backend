@@ -58,6 +58,7 @@ exports.handler = async (event) => {
     if (routeKey === "POST /admin/sprints/{id}/activate")              return await activateSprint(event)
     if (routeKey === "GET /admin/rankings")                            return await getRankings(event)
     if (routeKey === "GET /admin/fixtures/available")                  return await getAvailableFixtures(event)
+    if (routeKey === "POST /admin/fixtures/import-range")              return await importFixturesByRange(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -1404,10 +1405,7 @@ async function getAvailableFixtures(event) {
   if (!date_from || !date_to) return error(400, "date_from and date_to are required")
 
   const pool = await getPool()
-  const dbFrom = date_from.slice(0, 10)
-  const dbTo   = date_to.slice(0, 10)
-
-  const { rows: dbRows } = await pool.query(
+  const { rows } = await pool.query(
     `SELECT f.id, f.home_team, f.away_team, f.date, f.status_short,
             f.home_goals, f.away_goals, f.round, f.competition_id,
             f.home_logo, f.away_logo,
@@ -1417,57 +1415,42 @@ async function getAvailableFixtures(event) {
      LEFT JOIN competitions c ON c.id=f.competition_id
      WHERE f.date::date BETWEEN $1 AND $2
      ORDER BY f.date ASC`,
-    [dbFrom, dbTo]
+    [date_from.slice(0, 10), date_to.slice(0, 10)]
   )
+  return ok(rows)
+}
 
-  // Enough cached data — return immediately without hitting the API
-  if (dbRows.length >= 5) return ok(dbRows)
+async function importFixturesByRange(event) {
+  const b = JSON.parse(event.body || "{}")
+  const { date_from, date_to } = b
+  if (!date_from || !date_to) return error(400, "date_from and date_to are required")
 
-  // Fallback: fetch from API-Football for this date range (caches results)
-  try {
-    const secrets = await getSecrets()
-    const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
-      params: { from: dbFrom, to: dbTo },
-      headers: { "x-apisports-key": secrets.key },
-      timeout: 10000,
-    })
-    const apiErrors = res.data?.errors
-    if (apiErrors && Object.keys(apiErrors).length > 0) return ok(dbRows)
+  const dbFrom = date_from.slice(0, 10)
+  const dbTo   = date_to.slice(0, 10)
 
-    const apiFixtures = res.data?.response || []
+  const secrets = await getSecrets()
+  const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+    params: { from: dbFrom, to: dbTo },
+    headers: { "x-apisports-key": secrets.key },
+    timeout: 15000,
+  })
 
-    // Match each fixture's league to an existing competition by api_league_id
-    const compRes = await pool.query(
-      "SELECT id, api_league_id FROM competitions WHERE api_league_id IS NOT NULL"
-    )
-    const compByLeague = {}
-    for (const c of compRes.rows) compByLeague[c.api_league_id] = c.id
+  const apiErrors = res.data?.errors
+  if (apiErrors && Object.keys(apiErrors).length > 0)
+    return error(502, `API-Football error: ${JSON.stringify(apiErrors)}`)
 
-    const rows = apiFixtures.map(f => apiFixtureToRow(f, compByLeague[f.league.id] || null))
-    if (rows.length > 0) await upsertFixtures(pool, rows)
+  const apiFixtures = res.data?.response || []
+  if (apiFixtures.length === 0) return ok({ imported: 0, message: "No fixtures found for this date range" })
 
-    // Return API-shaped results merged with any existing DB rows
-    const existingIds = new Set(dbRows.map(r => String(r.id)))
-    const apiShaped = apiFixtures
-      .filter(f => !existingIds.has(String(f.fixture.id)))
-      .map(f => ({
-        id:               f.fixture.id,
-        home_team:        f.teams.home.name,
-        away_team:        f.teams.away.name,
-        date:             f.fixture.date,
-        status_short:     f.fixture.status.short,
-        home_goals:       f.goals.home,
-        away_goals:       f.goals.away,
-        round:            f.league.round,
-        home_logo:        f.teams.home.logo,
-        away_logo:        f.teams.away.logo,
-        competition_name: f.league.name,
-        api_league_id:    f.league.id,
-      }))
+  const pool = await getPool()
+  const compRes = await pool.query(
+    "SELECT id, api_league_id FROM competitions WHERE api_league_id IS NOT NULL"
+  )
+  const compByLeague = {}
+  for (const c of compRes.rows) compByLeague[c.api_league_id] = c.id
 
-    return ok([...dbRows, ...apiShaped].sort((a, b) => new Date(a.date) - new Date(b.date)))
-  } catch (err) {
-    console.error('API-Football fixture fallback failed:', err.message)
-    return ok(dbRows)
-  }
+  const rows = apiFixtures.map(f => apiFixtureToRow(f, compByLeague[f.league.id] || null))
+  await upsertFixtures(pool, rows)
+
+  return ok({ imported: rows.length, message: `Imported and cached ${rows.length} fixtures` })
 }
