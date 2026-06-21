@@ -7,6 +7,29 @@ const { ok, error, unauthorized } = require("../../shared/response")
 
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
+const CURATED_COMPETITIONS = [
+  { api_league_id: 1,   name: 'FIFA World Cup',         country: 'World',       flag: '🌍', type: 'Cup',        default_season: 2026 },
+  { api_league_id: 2,   name: 'UEFA Champions League',  country: 'Europe',      flag: '⭐', type: 'Cup',        default_season: 2024 },
+  { api_league_id: 3,   name: 'UEFA Europa League',     country: 'Europe',      flag: '🏅', type: 'Cup',        default_season: 2024 },
+  { api_league_id: 848, name: 'UEFA Conference League', country: 'Europe',      flag: '🥉', type: 'Cup',        default_season: 2024 },
+  { api_league_id: 5,   name: 'UEFA Nations League',    country: 'Europe',      flag: '🌐', type: 'Tournament', default_season: 2024 },
+  { api_league_id: 39,  name: 'Premier League',         country: 'England',     flag: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', type: 'League',     default_season: 2025 },
+  { api_league_id: 140, name: 'LaLiga',                 country: 'Spain',       flag: '🇪🇸', type: 'League',     default_season: 2025 },
+  { api_league_id: 78,  name: 'Bundesliga',             country: 'Germany',     flag: '🇩🇪', type: 'League',     default_season: 2025 },
+  { api_league_id: 135, name: 'Serie A',                country: 'Italy',       flag: '🇮🇹', type: 'League',     default_season: 2025 },
+  { api_league_id: 61,  name: 'Ligue 1',                country: 'France',      flag: '🇫🇷', type: 'League',     default_season: 2025 },
+  { api_league_id: 88,  name: 'Eredivisie',             country: 'Netherlands', flag: '🇳🇱', type: 'League',     default_season: 2025 },
+  { api_league_id: 94,  name: 'Primeira Liga',          country: 'Portugal',    flag: '🇵🇹', type: 'League',     default_season: 2025 },
+  { api_league_id: 144, name: 'Belgian Pro League',     country: 'Belgium',     flag: '🇧🇪', type: 'League',     default_season: 2025 },
+  { api_league_id: 179, name: 'Scottish Premiership',   country: 'Scotland',    flag: '🏴󠁧󠁢󠁳󠁣󠁴󠁿', type: 'League',     default_season: 2025 },
+  { api_league_id: 45,  name: 'FA Cup',                 country: 'England',     flag: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', type: 'Cup',        default_season: 2024 },
+  { api_league_id: 143, name: 'Copa del Rey',           country: 'Spain',       flag: '🇪🇸', type: 'Cup',        default_season: 2024 },
+  { api_league_id: 137, name: 'Coppa Italia',           country: 'Italy',       flag: '🇮🇹', type: 'Cup',        default_season: 2024 },
+  { api_league_id: 15,  name: 'Club World Cup',         country: 'World',       flag: '🌐', type: 'Tournament', default_season: 2025 },
+  { api_league_id: 253, name: 'MLS',                    country: 'USA',         flag: '🇺🇸', type: 'League',     default_season: 2025 },
+  { api_league_id: 71,  name: 'Série A',                country: 'Brazil',      flag: '🇧🇷', type: 'League',     default_season: 2025 },
+]
+
 exports.handler = async (event) => {
   const routeKey = event.routeKey
 
@@ -59,6 +82,8 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/rankings")                            return await getRankings(event)
     if (routeKey === "GET /admin/fixtures/available")                  return await getAvailableFixtures(event)
     if (routeKey === "POST /admin/fixtures/import-range")              return await importFixturesByRange(event)
+    if (routeKey === "GET /admin/competitions/browse")                 return await browseCompetitions()
+    if (routeKey === "POST /admin/competitions/import")                return await importCompetitionFromApi(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -1428,29 +1453,166 @@ async function importFixturesByRange(event) {
   const dbFrom = date_from.slice(0, 10)
   const dbTo   = date_to.slice(0, 10)
 
-  const secrets = await getSecrets()
-  const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
-    params: { from: dbFrom, to: dbTo },
-    headers: { "x-apisports-key": secrets.key },
-    timeout: 15000,
-  })
-
-  const apiErrors = res.data?.errors
-  if (apiErrors && Object.keys(apiErrors).length > 0)
-    return error(502, `API-Football error: ${JSON.stringify(apiErrors)}`)
-
-  const apiFixtures = res.data?.response || []
-  if (apiFixtures.length === 0) return ok({ imported: 0, message: "No fixtures found for this date range" })
-
   const pool = await getPool()
-  const compRes = await pool.query(
-    "SELECT id, api_league_id FROM competitions WHERE api_league_id IS NOT NULL"
+  const { rows: comps } = await pool.query(
+    "SELECT id, api_league_id, api_season FROM competitions WHERE api_league_id IS NOT NULL AND api_season IS NOT NULL"
   )
-  const compByLeague = {}
-  for (const c of compRes.rows) compByLeague[c.api_league_id] = c.id
+  if (comps.length === 0)
+    return ok({ imported: 0, message: "No competitions imported yet. Import competitions first from the Competitions page." })
 
-  const rows = apiFixtures.map(f => apiFixtureToRow(f, compByLeague[f.league.id] || null))
-  await upsertFixtures(pool, rows)
+  const secrets = await getSecrets()
+  let totalImported = 0
 
-  return ok({ imported: rows.length, message: `Imported and cached ${rows.length} fixtures` })
+  for (const comp of comps) {
+    try {
+      const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+        params: { league: comp.api_league_id, season: comp.api_season, from: dbFrom, to: dbTo },
+        headers: { "x-apisports-key": secrets.key },
+        timeout: 10000,
+      })
+      const apiErrors = res.data?.errors
+      if (apiErrors && Object.keys(apiErrors).length > 0) continue
+      const apiFixtures = res.data?.response || []
+      if (apiFixtures.length > 0) {
+        const rows = apiFixtures.map(f => apiFixtureToRow(f, comp.id))
+        await upsertFixtures(pool, rows)
+        totalImported += rows.length
+      }
+    } catch (e) {
+      console.error(`Sync failed for league ${comp.api_league_id}:`, e.message)
+    }
+  }
+
+  return ok({ imported: totalImported, message: `Synced ${totalImported} fixtures from ${comps.length} competitions` })
+}
+
+async function browseCompetitions() {
+  const pool = await getPool()
+  const { rows: imported } = await pool.query(`
+    SELECT c.id, c.api_league_id, c.api_season, c.name, c.logo_url, c.start_date, c.end_date,
+      (SELECT COUNT(*)::int FROM fixtures f WHERE f.competition_id=c.id) AS fixture_count,
+      (SELECT MAX(f.updated_at) FROM fixtures f WHERE f.competition_id=c.id) AS last_synced
+    FROM competitions c
+    WHERE c.api_league_id IS NOT NULL
+  `)
+  const importedByLeague = {}
+  for (const c of imported) {
+    const key = String(c.api_league_id)
+    if (!importedByLeague[key]) importedByLeague[key] = []
+    importedByLeague[key].push(c)
+  }
+  const result = CURATED_COMPETITIONS.map(c => ({
+    ...c,
+    logo_url: `https://media.api-sports.io/football/leagues/${c.api_league_id}.png`,
+    imported: importedByLeague[String(c.api_league_id)] || [],
+  }))
+  return ok(result)
+}
+
+async function importCompetitionFromApi(event) {
+  const b = JSON.parse(event.body || "{}")
+  const { api_league_id, season } = b
+  if (!api_league_id || !season) return error(400, "api_league_id and season are required")
+
+  const secrets = await getSecrets()
+
+  // 1. League metadata
+  const leagueRes = await axios.get(`${API_FOOTBALL_BASE}/leagues`, {
+    params: { id: api_league_id, season },
+    headers: { "x-apisports-key": secrets.key },
+    timeout: 10000,
+  })
+  const leagueErrors = leagueRes.data?.errors
+  if (leagueErrors && Object.keys(leagueErrors).length > 0)
+    return error(402, Object.values(leagueErrors).join(" "))
+
+  const leagueData = leagueRes.data?.response?.[0]
+  if (!leagueData) return error(404, `League ${api_league_id} not found for season ${season}`)
+
+  const { league, country } = leagueData
+  const seasonData = (leagueData.seasons || []).find(s => String(s.year) === String(season))
+  const startDate  = seasonData?.start ? new Date(seasonData.start) : null
+  const endDate    = seasonData?.end   ? new Date(seasonData.end)   : null
+  const numWeeks   = startDate && endDate
+    ? Math.round((endDate - startDate) / (7 * 86400000))
+    : 38
+
+  // 2. Upsert competition row
+  const pool = await getPool()
+  const existing = await pool.query(
+    "SELECT id FROM competitions WHERE api_league_id=$1 AND api_season=$2",
+    [String(api_league_id), String(season)]
+  )
+  let competitionId
+  if (existing.rows.length > 0) {
+    competitionId = existing.rows[0].id
+    await pool.query(
+      `UPDATE competitions SET name=$1, logo_url=$2, start_date=$3, end_date=$4, num_weeks=$5 WHERE id=$6`,
+      [league.name, league.logo, startDate, endDate, numWeeks, competitionId]
+    )
+  } else {
+    competitionId = uuidv4()
+    await pool.query(
+      `INSERT INTO competitions (id,name,logo_url,start_date,end_date,num_weeks,api_league_id,api_season)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [competitionId, league.name, league.logo, startDate, endDate, numWeeks,
+       String(api_league_id), String(season)]
+    )
+  }
+
+  // 3. Fetch all fixtures for this league+season
+  const fixturesRes = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+    params: { league: api_league_id, season },
+    headers: { "x-apisports-key": secrets.key },
+    timeout: 30000,
+  })
+  const fixtureErrors = fixturesRes.data?.errors
+  if (fixtureErrors && Object.keys(fixtureErrors).length > 0)
+    return error(402, Object.values(fixtureErrors).join(" "))
+
+  const apiFixtures = fixturesRes.data?.response || []
+  if (apiFixtures.length > 0) {
+    const rows = apiFixtures.map(f => apiFixtureToRow(f, competitionId))
+    await upsertFixtures(pool, rows)
+  }
+
+  // 4. Standings (optional — cups may not have them)
+  let standingsCount = 0
+  try {
+    const standingsRes = await axios.get(`${API_FOOTBALL_BASE}/standings`, {
+      params: { league: api_league_id, season },
+      headers: { "x-apisports-key": secrets.key },
+      timeout: 10000,
+    })
+    const leagueStandings = standingsRes.data?.response?.[0]?.league
+    if (leagueStandings?.standings) {
+      await pool.query("DELETE FROM competition_standings WHERE competition_id=$1", [competitionId])
+      for (const group of leagueStandings.standings) {
+        for (const entry of group) {
+          await pool.query(`
+            INSERT INTO competition_standings
+              (competition_id,group_name,rank,team,team_logo,points,played,win,draw,lose,gf,ga,gd,form,description,updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())`,
+            [competitionId, entry.group ?? null, entry.rank, entry.team.name, entry.team.logo,
+             entry.points, entry.all.played, entry.all.win, entry.all.draw, entry.all.lose,
+             entry.all.goals.for, entry.all.goals.against, entry.goalsDiff,
+             entry.form ?? null, entry.description ?? null]
+          )
+          standingsCount++
+        }
+      }
+    }
+  } catch (e) {
+    console.log("Standings not available for this competition:", e.message)
+  }
+
+  return ok({
+    competition_id: competitionId,
+    name: league.name,
+    logo_url: league.logo,
+    fixtures_imported: apiFixtures.length,
+    standings_imported: standingsCount,
+    is_new: existing.rows.length === 0,
+    message: `Imported ${apiFixtures.length} fixtures${standingsCount > 0 ? ` and ${standingsCount} standings entries` : ''}`,
+  }, existing.rows.length > 0 ? 200 : 201)
 }

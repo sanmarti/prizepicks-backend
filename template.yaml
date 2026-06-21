@@ -244,6 +244,7 @@ Resources:
       FunctionName: prizepicks-admin-prod
       Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/admin/handler.handler
+      Timeout: 60
       Events:
         CreateGameweek:
           Type: HttpApi
@@ -358,6 +359,18 @@ Resources:
           Properties:
             ApiId: !Ref PrizePicksApi
             Path: /admin/fixtures/import-range
+            Method: POST
+        BrowseCompetitions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/browse
+            Method: GET
+        ImportCompetitionFromApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/import
             Method: POST
         # 6 to Glory – Divisions
         ListDivisions:
