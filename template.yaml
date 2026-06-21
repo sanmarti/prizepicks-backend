@@ -470,6 +470,12 @@ Resources:
             ApiId: !Ref PublicApi
             Path: /scores
             Method: GET
+        Scores:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /scores
+            Method: GET
 
   # --- 6 TO GLORY (user-facing) ---
   GloryFunction:
