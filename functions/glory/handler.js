@@ -7,6 +7,7 @@ const { v4: uuidv4 }       = require("uuid")
 
 const API_FOOTBALL_BASE    = "https://v3.football.api-sports.io"
 const FINISHED_STATUSES    = ['FT', 'AET', 'PEN', 'AWD', 'WO']
+const LIVE_STATUSES        = ['1H', 'HT', '2H', 'ET', 'BT', 'P', 'SUSP', 'INT', 'LIVE']
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
@@ -27,8 +28,9 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/profile")                   return await getProfile(event, user)
     if (routeKey === "GET /glory/leaderboard")               return await getLeaderboard(event, user)
     if (routeKey === "GET /glory/sprints")                   return await listActiveSprints(event, user)
-    if (routeKey === "GET /glory/divisions")                  return await listDivisions(event, user)
     if (routeKey === "GET /glory/sprints/my")                 return await myRelevantSprints(event, user)
+    if (routeKey === "GET /glory/sprints/{id}")               return await getSprintDetail(event, user)
+    if (routeKey === "GET /glory/divisions")                  return await listDivisions(event, user)
     if (routeKey === "GET /glory/gameweek/{id}/community")    return await getCommunityPicks(event, user)
     if (routeKey === "GET /glory/users/{id}")                 return await getPublicProfile(event, user)
     if (routeKey === "GET /glory/fixtures/{id}/stats")        return await getFixtureStats(event, user)
@@ -481,6 +483,82 @@ async function getLeaderboard(event, user) {
   })
 }
 
+// ── GET /glory/sprints/{id} ───────────────────────────────────────────────────
+async function getSprintDetail(event, user) {
+  const { id: sprintId } = event.pathParameters
+  const pool = await getPool()
+
+  const sprintRes = await pool.query("SELECT * FROM sprints WHERE id=$1", [sprintId])
+  if (!sprintRes.rows.length) return error(404, "Sprint not found")
+  const sprint = sprintRes.rows[0]
+
+  const progRes = await pool.query(
+    "SELECT * FROM user_sprint_progress WHERE user_id=$1 AND sprint_id=$2",
+    [user.id, sprintId]
+  )
+  const progress = progRes.rows[0] ?? null
+
+  let division = null
+  let rankings = []
+  if (progress?.division_id) {
+    const divRes = await pool.query("SELECT * FROM divisions WHERE id=$1", [progress.division_id])
+    division = divRes.rows[0] ?? null
+    const rankRes = await pool.query(
+      `SELECT usp.user_id, u.display_name, u.avatar_url,
+              usp.total_league_points, usp.total_correct_picks,
+              usp.perfect_weeks, usp.sprint_outcome,
+              RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS rank
+       FROM user_sprint_progress usp
+       JOIN users u ON u.id=usp.user_id
+       WHERE usp.sprint_id=$1 AND usp.division_id=$2
+       ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC`,
+      [sprintId, progress.division_id]
+    )
+    rankings = rankRes.rows
+  }
+
+  const gwRes = await pool.query(
+    `SELECT g.*,
+       uge.id AS entry_id, uge.correct_picks, uge.incorrect_picks,
+       uge.league_points, uge.is_perfect_week, uge.status AS entry_status
+     FROM gameweeks g
+     LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id=g.id AND uge.user_id=$2
+     WHERE g.sprint_id=$1
+     ORDER BY g.sprint_week ASC`,
+    [sprintId, user.id]
+  )
+
+  const gameweeks = []
+  for (const gw of gwRes.rows) {
+    let picks = []
+    if (gw.entry_id) {
+      const pRes = await pool.query(
+        `SELECT up.event_id, up.event_option_id,
+                e.event_type, e.fixture_name, e.match_time,
+                eo.label AS option_label, eo.result AS option_result,
+                eo.energy_cost
+         FROM user_picks up
+         JOIN events e ON e.id=up.event_id
+         JOIN event_options eo ON eo.id=up.event_option_id
+         WHERE up.entry_id=$1 ORDER BY e.match_time ASC`,
+        [gw.entry_id]
+      )
+      picks = pRes.rows
+    }
+    gameweeks.push({
+      id: gw.id, sprint_week: gw.sprint_week, status: gw.status, lock_time: gw.lock_time,
+      entry: gw.entry_id ? {
+        correct_picks: gw.correct_picks, incorrect_picks: gw.incorrect_picks,
+        league_points: gw.league_points, is_perfect_week: gw.is_perfect_week,
+        status: gw.entry_status,
+      } : null,
+      picks,
+    })
+  }
+
+  return ok({ sprint, progress, division, rankings, gameweeks })
+}
+
 // ── GET /glory/sprints ────────────────────────────────────────────────────────
 async function listActiveSprints(event, user) {
   const pool = await getPool()
@@ -677,21 +755,11 @@ async function getFixtureStats(event, user) {
   const fx = fixRow.rows[0]
 
   const isFinished = FINISHED_STATUSES.includes(fx.status_short)
+  const isLive     = LIVE_STATUSES.includes(fx.status_short)
 
-  const [evRows, stRows] = await Promise.all([
-    pool.query(
-      `SELECT elapsed, extra, team, team_logo, player, assist, type, detail
-       FROM fixture_events WHERE fixture_id=$1
-       ORDER BY elapsed ASC, extra ASC NULLS LAST`, [fixtureId]
-    ),
-    pool.query(
-      `SELECT team, team_logo, stat_type, stat_value
-       FROM fixture_statistics WHERE fixture_id=$1`, [fixtureId]
-    ),
-  ])
-
-  // If finished and not yet cached, fetch from API-Football once and store
-  if (isFinished && !fx.details_cached && evRows.rows.length === 0 && stRows.rows.length === 0) {
+  // For live fixtures always fetch fresh from API-Football (no caching)
+  // For finished fixtures fetch once and cache
+  if (isLive || (isFinished && !fx.details_cached)) {
     try {
       const secrets = await getSecrets()
       const headers = { "x-apisports-key": secrets.key }
@@ -719,32 +787,47 @@ async function getFixtureStats(event, user) {
         }))
       )
 
-      for (const ev of apiEvents) {
-        await pool.query(
-          `INSERT INTO fixture_events (fixture_id,elapsed,extra,team,team_logo,player,assist,type,detail)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [fixtureId, ev.elapsed, ev.extra, ev.team, ev.team_logo, ev.player, ev.assist, ev.type, ev.detail]
-        )
+      // Only persist to DB for finished fixtures
+      if (isFinished) {
+        for (const ev of apiEvents) {
+          await pool.query(
+            `INSERT INTO fixture_events (fixture_id,elapsed,extra,team,team_logo,player,assist,type,detail)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [fixtureId, ev.elapsed, ev.extra, ev.team, ev.team_logo, ev.player, ev.assist, ev.type, ev.detail]
+          )
+        }
+        for (const s of apiStats) {
+          await pool.query(
+            `INSERT INTO fixture_statistics (fixture_id,team,team_logo,stat_type,stat_value)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [fixtureId, s.team, s.team_logo, s.stat_type, s.stat_value]
+          )
+        }
+        await pool.query("UPDATE fixtures SET details_cached=true WHERE id=$1", [fixtureId])
       }
-      for (const s of apiStats) {
-        await pool.query(
-          `INSERT INTO fixture_statistics (fixture_id,team,team_logo,stat_type,stat_value)
-           VALUES ($1,$2,$3,$4,$5)`,
-          [fixtureId, s.team, s.team_logo, s.stat_type, s.stat_value]
-        )
-      }
-      await pool.query("UPDATE fixtures SET details_cached=true WHERE id=$1", [fixtureId])
 
       const statsTeams = [...new Set(apiStats.map(r => r.team))]
       const statistics = statsTeams.map(team => {
         const rows = apiStats.filter(r => r.team === team)
         return { team, team_logo: rows[0]?.team_logo, stats: rows.map(r => ({ type: r.stat_type, value: r.stat_value })) }
       })
-      return ok({ fixture: fx, events: apiEvents, statistics, cached: false, source: 'api' })
+      return ok({ fixture: fx, events: apiEvents, statistics, cached: false, source: isLive ? 'live' : 'api' })
     } catch {
-      // Fall through to return empty (API failed or quota exceeded)
+      // Fall through to return cached DB data or empty
     }
   }
+
+  const [evRows, stRows] = await Promise.all([
+    pool.query(
+      `SELECT elapsed, extra, team, team_logo, player, assist, type, detail
+       FROM fixture_events WHERE fixture_id=$1
+       ORDER BY elapsed ASC, extra ASC NULLS LAST`, [fixtureId]
+    ),
+    pool.query(
+      `SELECT team, team_logo, stat_type, stat_value
+       FROM fixture_statistics WHERE fixture_id=$1`, [fixtureId]
+    ),
+  ])
 
   const statsTeams = [...new Set(stRows.rows.map(r => r.team))]
   const statistics = statsTeams.map(team => {

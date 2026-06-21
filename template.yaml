@@ -545,6 +545,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/sprints/my
             Method: GET
+        GlorySprintDetail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/sprints/{id}
+            Method: GET
         GloryCommunityPicks:
           Type: HttpApi
           Properties:
@@ -556,6 +562,12 @@ Resources:
           Properties:
             ApiId: !Ref PrizePicksApi
             Path: /glory/users/{id}
+            Method: GET
+        GloryFixtureStats:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/fixtures/{id}/stats
             Method: GET
 
 Outputs:
