@@ -1086,13 +1086,13 @@ async function addSprintGameweek(event) {
   const sprint = await pool.query("SELECT id FROM sprints WHERE id=$1", [sprintId])
   if (!sprint.rows.length) return error(404, "Sprint not found")
 
-  // If a DRAFT already exists for this week, delete it so we can replace
+  // If a DRAFT or PUBLISHED already exists for this week, replace it
   const existing = await pool.query(
     "SELECT id, status FROM gameweeks WHERE sprint_id=$1 AND sprint_week=$2",
     [sprintId, sprint_week]
   )
   if (existing.rows.length) {
-    if (existing.rows[0].status !== 'DRAFT')
+    if (!['DRAFT', 'PUBLISHED'].includes(existing.rows[0].status))
       return error(409, `Sprint week ${sprint_week} already has a ${existing.rows[0].status} gameweek`)
     await pool.query("DELETE FROM gameweeks WHERE id=$1", [existing.rows[0].id])
   }
@@ -1388,6 +1388,7 @@ async function getRankings(event) {
   const qs = event.queryStringParameters || {}
   const divisionId = qs.division_id
   const sprintId   = qs.sprint_id
+  const week       = qs.week ? parseInt(qs.week, 10) : null
 
   const pool = await getPool()
 
@@ -1400,6 +1401,27 @@ async function getRankings(event) {
   }
 
   if (!sid) return ok({ rows: [], sprint: null })
+
+  const sprint = await pool.query("SELECT * FROM sprints WHERE id=$1", [sid])
+
+  if (week) {
+    const { rows } = await pool.query(
+      `SELECT
+         uge.user_id, u.email, u.display_name,
+         uge.league_points      AS total_league_points,
+         uge.correct_picks      AS total_correct_picks,
+         uge.incorrect_picks    AS total_incorrect_picks,
+         uge.is_perfect_week,
+         RANK() OVER (ORDER BY uge.league_points DESC, uge.correct_picks DESC) AS rank
+       FROM user_gameweek_entries uge
+       JOIN users u ON u.id=uge.user_id
+       JOIN gameweeks g ON g.id=uge.gameweek_id
+       WHERE uge.sprint_id=$1 AND g.sprint_week=$2
+       ORDER BY uge.league_points DESC, uge.correct_picks DESC`,
+      [sid, week]
+    )
+    return ok({ rows, sprint: sprint.rows[0] ?? null, division: null, week })
+  }
 
   let where = "WHERE usp.sprint_id=$1"
   const params = [sid]
@@ -1420,7 +1442,6 @@ async function getRankings(event) {
     params
   )
 
-  const sprint = await pool.query("SELECT * FROM sprints WHERE id=$1", [sid])
   const divRes = divisionId
     ? await pool.query("SELECT * FROM divisions WHERE id=$1", [divisionId])
     : { rows: [null] }
