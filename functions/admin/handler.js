@@ -33,9 +33,13 @@ const CURATED_COMPETITIONS = [
 exports.handler = async (event) => {
   const routeKey = event.routeKey
 
-  // Public route — no auth required
+  // Public routes — no auth required
   if (routeKey === "GET /competitions") {
     try { return await listCompetitions() }
+    catch (err) { console.error(err); return error(500, "Internal server error") }
+  }
+  if (routeKey === "GET /scores") {
+    try { return await getPublicScores(event) }
     catch (err) { console.error(err); return error(500, "Internal server error") }
   }
 
@@ -1672,4 +1676,34 @@ async function refreshFixtureResults(event) {
   }
 
   return ok({ updated, pending: pending.length, message: `Refreshed ${updated}/${pending.length} fixtures` })
+}
+
+// Public — returns all fixtures for a given date grouped by competition.
+// Used by the user-facing live scores page.
+async function getPublicScores(event) {
+  const qs   = event.queryStringParameters || {}
+  const date = (qs.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10)
+
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT f.id, f.home_team, f.away_team, f.date,
+            f.status_short, f.status_long, f.status_elapsed,
+            f.home_goals, f.away_goals, f.round,
+            f.home_logo, f.away_logo,
+            COALESCE(c.name, f.league_name) AS competition_name,
+            c.logo_url AS competition_logo,
+            COALESCE(c.api_league_id::integer, f.api_league_id) AS api_league_id
+     FROM fixtures f
+     LEFT JOIN competitions c ON c.id = f.competition_id
+     WHERE f.date::date = $1
+     ORDER BY
+       CASE
+         WHEN f.status_short IN ('1H','HT','2H','ET','BT','P','LIVE') THEN 0
+         WHEN f.status_short = 'NS' THEN 1
+         ELSE 2
+       END,
+       f.date ASC`,
+    [date]
+  )
+  return ok(rows)
 }
