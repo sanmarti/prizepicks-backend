@@ -372,6 +372,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/competitions/import
             Method: POST
+        RefreshFixtureResults:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/fixtures/refresh-results
+            Method: POST
         # 6 to Glory – Divisions
         ListDivisions:
           Type: HttpApi

@@ -82,6 +82,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/rankings")                            return await getRankings(event)
     if (routeKey === "GET /admin/fixtures/available")                  return await getAvailableFixtures(event)
     if (routeKey === "POST /admin/fixtures/import-range")              return await importFixturesByRange(event)
+    if (routeKey === "POST /admin/fixtures/refresh-results")           return await refreshFixtureResults(event)
     if (routeKey === "GET /admin/competitions/browse")                 return await browseCompetitions()
     if (routeKey === "POST /admin/competitions/import")                return await importCompetitionFromApi(event)
     return error(404, "Not found")
@@ -1435,7 +1436,7 @@ async function getAvailableFixtures(event) {
             f.home_goals, f.away_goals, f.round, f.competition_id,
             f.home_logo, f.away_logo,
             COALESCE(c.name, f.league_name) AS competition_name,
-            COALESCE(c.api_league_id, f.api_league_id) AS api_league_id
+            COALESCE(c.api_league_id::integer, f.api_league_id) AS api_league_id
      FROM fixtures f
      LEFT JOIN competitions c ON c.id=f.competition_id
      WHERE f.date::date BETWEEN $1 AND $2
@@ -1615,4 +1616,60 @@ async function importCompetitionFromApi(event) {
     is_new: existing.rows.length === 0,
     message: `Imported ${apiFixtures.length} fixtures${standingsCount > 0 ? ` and ${standingsCount} standings entries` : ''}`,
   }, existing.rows.length > 0 ? 200 : 201)
+}
+
+// Re-fetches live results for all non-finished fixtures in a date range.
+// Used to keep scores up to date without a full re-import.
+async function refreshFixtureResults(event) {
+  const b = JSON.parse(event.body || "{}")
+  const { date_from, date_to } = b
+  if (!date_from || !date_to) return error(400, "date_from and date_to are required")
+
+  const pool = await getPool()
+
+  // Find non-finished fixture IDs in the range
+  const { rows: pending } = await pool.query(
+    `SELECT DISTINCT f.id, f.api_league_id, c.api_season
+     FROM fixtures f
+     LEFT JOIN competitions c ON c.id = f.competition_id
+     WHERE f.date::date BETWEEN $1 AND $2
+       AND f.status_short NOT IN ('FT','AET','PEN','AWD','WO')
+     LIMIT 100`,
+    [date_from.slice(0, 10), date_to.slice(0, 10)]
+  )
+
+  if (pending.length === 0)
+    return ok({ updated: 0, message: "All fixtures in this range are already finished" })
+
+  const secrets = await getSecrets()
+  let updated = 0
+
+  // Fetch each fixture individually for live status
+  for (const fx of pending) {
+    try {
+      const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+        params: { id: fx.id },
+        headers: { "x-apisports-key": secrets.key },
+        timeout: 8000,
+      })
+      const apiErrors = res.data?.errors
+      if (apiErrors && Object.keys(apiErrors).length > 0) continue
+      const apiFixtures = res.data?.response || []
+      if (apiFixtures.length > 0) {
+        // Find the competition_id from our DB
+        const comp = await pool.query(
+          "SELECT id FROM competitions WHERE api_league_id=$1 AND api_season=$2",
+          [String(apiFixtures[0].league.id), String(apiFixtures[0].league.season)]
+        )
+        const competitionId = comp.rows[0]?.id || null
+        const rows = apiFixtures.map(f => apiFixtureToRow(f, competitionId))
+        await upsertFixtures(pool, rows)
+        updated += rows.length
+      }
+    } catch (e) {
+      console.error(`Refresh failed for fixture ${fx.id}:`, e.message)
+    }
+  }
+
+  return ok({ updated, pending: pending.length, message: `Refreshed ${updated}/${pending.length} fixtures` })
 }
