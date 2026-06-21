@@ -347,11 +347,154 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/fixtures/{fixtureId}/details
             Method: GET
+        GetAvailableFixtures:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/fixtures/available
+            Method: GET
+        # 6 to Glory – Divisions
+        ListDivisions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/divisions
+            Method: GET
+        CreateDivision:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/divisions
+            Method: POST
+        UpdateDivision:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/divisions/{id}
+            Method: PUT
+        GetDivisionUsers:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/divisions/{id}/users
+            Method: GET
+        # 6 to Glory – Sprints
+        ListSprints:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints
+            Method: GET
+        CreateSprint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints
+            Method: POST
+        GetSprint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}
+            Method: GET
+        UpdateSprint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}
+            Method: PUT
+        AddSprintGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}/gameweeks
+            Method: POST
+        RemoveSprintGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}/gameweeks/{gwId}
+            Method: DELETE
+        SettleSprint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}/settle
+            Method: POST
+        ActivateSprint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}/activate
+            Method: POST
+        AdminRankings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/rankings
+            Method: GET
         ListCompetitionsPublic:
           Type: HttpApi
           Properties:
             ApiId: !Ref PublicApi
             Path: /competitions
+            Method: GET
+
+  # --- 6 TO GLORY (user-facing) ---
+  GloryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-glory-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
+      Handler: functions/glory/handler.handler
+      Events:
+        GloryStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/status
+            Method: GET
+        GloryCurrentGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/gameweek
+            Method: GET
+        GloryGetGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/gameweek/{id}
+            Method: GET
+        GlorySubmitPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/gameweek/{id}/picks
+            Method: POST
+        GloryGetPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/gameweek/{id}/picks
+            Method: GET
+        GloryProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/profile
+            Method: GET
+        GloryLeaderboard:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/leaderboard
+            Method: GET
+        GlorySprints:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/sprints
             Method: GET
 
 Outputs:

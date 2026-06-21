@@ -42,6 +42,21 @@ async function register(event) {
     [uuidv4(), userId]
   )
 
+  // Auto-assign Academy division (6 to Glory)
+  try {
+    const academy = await pool.query("SELECT id FROM divisions WHERE is_initial=TRUE LIMIT 1")
+    if (academy.rows.length) {
+      const activeSprint = await pool.query(
+        "SELECT id FROM sprints WHERE status IN ('live','scheduled') ORDER BY start_date ASC LIMIT 1"
+      )
+      const rookieUntilId = activeSprint.rows[0]?.id ?? null
+      await pool.query(
+        "INSERT INTO user_division_status (user_id,division_id,is_rookie,rookie_until_sprint_id) VALUES ($1,$2,TRUE,$3) ON CONFLICT (user_id) DO NOTHING",
+        [userId, academy.rows[0].id, rookieUntilId]
+      )
+    }
+  } catch {}  // non-fatal: ensureDivisionStatus in glory handler will fix it
+
   const token = await signToken({
     userId,
     email: email.toLowerCase(),
