@@ -452,6 +452,8 @@ function fixtureRowToShape(row) {
     pen_home:       row.pen_home,
     pen_away:       row.pen_away,
     round:          row.round,
+    league_name:    row.league_name,
+    api_league_id:  row.api_league_id,
   }
 }
 
@@ -481,6 +483,8 @@ function apiFixtureToRow(f, competitionId) {
     et_away:        f.score.extratime?.away ?? null,
     pen_home:       f.score.penalty?.home ?? null,
     pen_away:       f.score.penalty?.away ?? null,
+    league_name:    f.league.name ?? null,
+    api_league_id:  f.league.id ?? null,
   }
 }
 
@@ -492,10 +496,10 @@ async function upsertFixtures(pool, rows) {
         referee, venue_name, venue_city,
         home_team, home_logo, home_winner, away_team, away_logo, away_winner,
         home_goals, away_goals, ht_home, ht_away, et_home, et_away, pen_home, pen_away,
-        updated_at
+        league_name, api_league_id, updated_at
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-        $17,$18,$19,$20,$21,$22,$23,$24, NOW()
+        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26, NOW()
       )
       ON CONFLICT (id) DO UPDATE SET
         status_short=EXCLUDED.status_short, status_long=EXCLUDED.status_long,
@@ -504,12 +508,16 @@ async function upsertFixtures(pool, rows) {
         away_goals=EXCLUDED.away_goals, ht_home=EXCLUDED.ht_home, ht_away=EXCLUDED.ht_away,
         et_home=EXCLUDED.et_home, et_away=EXCLUDED.et_away,
         pen_home=EXCLUDED.pen_home, pen_away=EXCLUDED.pen_away,
-        referee=EXCLUDED.referee, updated_at=NOW()
+        referee=EXCLUDED.referee,
+        league_name=COALESCE(EXCLUDED.league_name, fixtures.league_name),
+        api_league_id=COALESCE(EXCLUDED.api_league_id, fixtures.api_league_id),
+        updated_at=NOW()
       `, [
         r.id, r.competition_id, r.round, r.date, r.status_short, r.status_long, r.status_elapsed,
         r.referee, r.venue_name, r.venue_city,
         r.home_team, r.home_logo, r.home_winner, r.away_team, r.away_logo, r.away_winner,
         r.home_goals, r.away_goals, r.ht_home, r.ht_away, r.et_home, r.et_away, r.pen_home, r.pen_away,
+        r.league_name ?? null, r.api_league_id ?? null,
       ])
   }
 }
@@ -935,6 +943,26 @@ async function getSprint(event) {
     [id]
   )
 
+  // Attach events + options to each gameweek (needed for draft editing in admin)
+  for (const gw of gwRes.rows) {
+    const evRes = await pool.query(
+      `SELECT e.id, e.event_type, e.fixture_id, e.fixture_name, e.player_name,
+              e.competition, e.match_time,
+              COALESCE(
+                json_agg(json_build_object('id',o.id,'label',o.label,'energy_cost',o.energy_cost)
+                  ORDER BY o.id) FILTER (WHERE o.id IS NOT NULL),
+                '[]'::json
+              ) AS options
+       FROM events e
+       LEFT JOIN event_options o ON o.event_id=e.id
+       WHERE e.gameweek_id=$1
+       GROUP BY e.id
+       ORDER BY e.match_time ASC`,
+      [gw.id]
+    )
+    gw.events = evRes.rows
+  }
+
   const statsRes = await pool.query(
     `SELECT
        COUNT(DISTINCT user_id)::int                     AS participants,
@@ -1020,19 +1048,23 @@ async function addSprintGameweek(event) {
     return error(400, "sprint_week, lock_time, and events are required")
   if (sprint_week < 1 || sprint_week > 4)
     return error(400, "sprint_week must be between 1 and 4")
-  if (eventDefs.length !== 15)
-    return error(400, "Exactly 15 events are required for a sprint gameweek")
+  if (eventDefs.length > 15)
+    return error(400, "Maximum 15 events allowed")
 
   const pool = await getPool()
   const sprint = await pool.query("SELECT id FROM sprints WHERE id=$1", [sprintId])
   if (!sprint.rows.length) return error(404, "Sprint not found")
 
-  // Check slot is free
+  // If a DRAFT already exists for this week, delete it so we can replace
   const existing = await pool.query(
-    "SELECT id FROM gameweeks WHERE sprint_id=$1 AND sprint_week=$2",
+    "SELECT id, status FROM gameweeks WHERE sprint_id=$1 AND sprint_week=$2",
     [sprintId, sprint_week]
   )
-  if (existing.rows.length) return error(409, "Sprint week " + sprint_week + " already has a gameweek")
+  if (existing.rows.length) {
+    if (existing.rows[0].status !== 'DRAFT')
+      return error(409, `Sprint week ${sprint_week} already has a ${existing.rows[0].status} gameweek`)
+    await pool.query("DELETE FROM gameweeks WHERE id=$1", [existing.rows[0].id])
+  }
 
   const gwId = uuidv4()
   await pool.query(
@@ -1372,16 +1404,70 @@ async function getAvailableFixtures(event) {
   if (!date_from || !date_to) return error(400, "date_from and date_to are required")
 
   const pool = await getPool()
-  const { rows } = await pool.query(
+  const dbFrom = date_from.slice(0, 10)
+  const dbTo   = date_to.slice(0, 10)
+
+  const { rows: dbRows } = await pool.query(
     `SELECT f.id, f.home_team, f.away_team, f.date, f.status_short,
             f.home_goals, f.away_goals, f.round, f.competition_id,
             f.home_logo, f.away_logo,
-            c.name AS competition_name
+            COALESCE(c.name, f.league_name) AS competition_name,
+            COALESCE(c.api_league_id, f.api_league_id) AS api_league_id
      FROM fixtures f
      LEFT JOIN competitions c ON c.id=f.competition_id
-     WHERE f.date BETWEEN $1 AND $2
+     WHERE f.date::date BETWEEN $1 AND $2
      ORDER BY f.date ASC`,
-    [date_from, date_to]
+    [dbFrom, dbTo]
   )
-  return ok(rows)
+
+  // Enough cached data — return immediately without hitting the API
+  if (dbRows.length >= 5) return ok(dbRows)
+
+  // Fallback: fetch from API-Football for this date range (caches results)
+  try {
+    const secrets = await getSecrets()
+    const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+      params: { from: dbFrom, to: dbTo },
+      headers: { "x-apisports-key": secrets.key },
+      timeout: 10000,
+    })
+    const apiErrors = res.data?.errors
+    if (apiErrors && Object.keys(apiErrors).length > 0) return ok(dbRows)
+
+    const apiFixtures = res.data?.response || []
+
+    // Match each fixture's league to an existing competition by api_league_id
+    const compRes = await pool.query(
+      "SELECT id, api_league_id FROM competitions WHERE api_league_id IS NOT NULL"
+    )
+    const compByLeague = {}
+    for (const c of compRes.rows) compByLeague[c.api_league_id] = c.id
+
+    const rows = apiFixtures.map(f => apiFixtureToRow(f, compByLeague[f.league.id] || null))
+    if (rows.length > 0) await upsertFixtures(pool, rows)
+
+    // Return API-shaped results merged with any existing DB rows
+    const existingIds = new Set(dbRows.map(r => String(r.id)))
+    const apiShaped = apiFixtures
+      .filter(f => !existingIds.has(String(f.fixture.id)))
+      .map(f => ({
+        id:               f.fixture.id,
+        home_team:        f.teams.home.name,
+        away_team:        f.teams.away.name,
+        date:             f.fixture.date,
+        status_short:     f.fixture.status.short,
+        home_goals:       f.goals.home,
+        away_goals:       f.goals.away,
+        round:            f.league.round,
+        home_logo:        f.teams.home.logo,
+        away_logo:        f.teams.away.logo,
+        competition_name: f.league.name,
+        api_league_id:    f.league.id,
+      }))
+
+    return ok([...dbRows, ...apiShaped].sort((a, b) => new Date(a.date) - new Date(b.date)))
+  } catch (err) {
+    console.error('API-Football fixture fallback failed:', err.message)
+    return ok(dbRows)
+  }
 }

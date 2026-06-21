@@ -1,5 +1,4 @@
 const { getPool }          = require("../../shared/db")
-const { getSecrets }       = require("../../shared/ssm")
 const { verifyToken, extractFromEvent } = require("../../shared/auth")
 const { ok, error, unauthorized } = require("../../shared/response")
 const { v4: uuidv4 }       = require("uuid")
