@@ -22,6 +22,10 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/profile")                   return await getProfile(event, user)
     if (routeKey === "GET /glory/leaderboard")               return await getLeaderboard(event, user)
     if (routeKey === "GET /glory/sprints")                   return await listActiveSprints(event, user)
+    if (routeKey === "GET /glory/divisions")                  return await listDivisions(event, user)
+    if (routeKey === "GET /glory/sprints/my")                 return await myRelevantSprints(event, user)
+    if (routeKey === "GET /glory/gameweek/{id}/community")    return await getCommunityPicks(event, user)
+    if (routeKey === "GET /glory/users/{id}")                 return await getPublicProfile(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -482,6 +486,174 @@ async function listActiveSprints(event, user) {
      ORDER BY s.start_date DESC LIMIT 10`
   )
   return ok(rows)
+}
+
+// ── GET /glory/divisions ──────────────────────────────────────────────────────
+async function listDivisions(event, user) {
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT * FROM divisions WHERE is_active=TRUE ORDER BY display_order ASC`
+  )
+  return ok(rows)
+}
+
+// ── GET /glory/sprints/my ────────────────────────────────────────────────────
+async function myRelevantSprints(event, user) {
+  const pool = await getPool()
+  const now = new Date()
+  const currentMonthStart = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1))
+  const nextMonthStart    = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 1))
+  const twoMonthsEnd      = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 2, 28, 23, 59, 59))
+
+  // Past + active sprints with user progress
+  const { rows: pastRows } = await pool.query(
+    `SELECT s.*,
+       usp.total_league_points, usp.total_correct_picks, usp.perfect_weeks,
+       usp.gameweeks_participated, usp.is_rookie, usp.sprint_outcome,
+       usp.division_id,
+       d.name AS division_name, d.icon AS division_icon, d.color_primary,
+       (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
+       (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks
+     FROM sprints s
+     LEFT JOIN user_sprint_progress usp ON usp.sprint_id=s.id AND usp.user_id=$1
+     LEFT JOIN divisions d ON d.id=usp.division_id
+     WHERE s.status IN ('live','scheduled','completed','archived')
+        OR (s.status='draft' AND s.start_date <= $2)
+     ORDER BY s.start_date DESC`,
+    [user.id, twoMonthsEnd.toISOString()]
+  )
+
+  // Upcoming draft sprints for current month + next month only
+  const { rows: futureRows } = await pool.query(
+    `SELECT s.*,
+       (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
+       (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks
+     FROM sprints s
+     WHERE s.status='draft'
+       AND s.start_date >= $1
+       AND s.start_date <= $2
+     ORDER BY s.start_date ASC
+     LIMIT 2`,
+    [currentMonthStart.toISOString(), twoMonthsEnd.toISOString()]
+  )
+
+  return ok({ past: pastRows, upcoming: futureRows })
+}
+
+// ── GET /glory/gameweek/{id}/community ───────────────────────────────────────
+// Returns all events with pick counts per option — only available after lock time
+async function getCommunityPicks(event, user) {
+  const { id: gwId } = event.pathParameters
+  const pool = await getPool()
+
+  const gwRes = await pool.query("SELECT * FROM gameweeks WHERE id=$1", [gwId])
+  if (!gwRes.rows.length) return error(404, "Gameweek not found")
+  const gw = gwRes.rows[0]
+
+  const isLocked = gw.status === 'LOCKED' || gw.status === 'FINISHED' ||
+    new Date() > new Date(gw.lock_time)
+  if (!isLocked) return error(403, "Community picks are only visible after picks lock")
+
+  // Events + options
+  const evRes = await pool.query(
+    "SELECT * FROM events WHERE gameweek_id=$1 ORDER BY match_time ASC", [gwId]
+  )
+  const optRes = await pool.query(
+    `SELECT eo.*, COUNT(up.id)::int AS pick_count
+     FROM event_options eo
+     JOIN events e ON e.id=eo.event_id
+     LEFT JOIN user_picks up ON up.event_option_id=eo.id
+     WHERE e.gameweek_id=$1
+     GROUP BY eo.id`, [gwId]
+  )
+
+  // User's own picks
+  const entryRes = await pool.query(
+    "SELECT id FROM user_gameweek_entries WHERE user_id=$1 AND gameweek_id=$2",
+    [user.id, gwId]
+  )
+  let myPickedOptionIds = new Set()
+  if (entryRes.rows.length) {
+    const picksRes = await pool.query(
+      "SELECT event_option_id FROM user_picks WHERE entry_id=$1", [entryRes.rows[0].id]
+    )
+    myPickedOptionIds = new Set(picksRes.rows.map(r => r.event_option_id))
+  }
+
+  const optsByEvent = {}
+  for (const o of optRes.rows) {
+    if (!optsByEvent[o.event_id]) optsByEvent[o.event_id] = []
+    optsByEvent[o.event_id].push({
+      id: o.id, label: o.label, result: o.result,
+      pick_count: o.pick_count, is_my_pick: myPickedOptionIds.has(o.id),
+    })
+  }
+
+  // Total entries in this gameweek
+  const countRes = await pool.query(
+    "SELECT COUNT(*)::int AS total FROM user_gameweek_entries WHERE gameweek_id=$1", [gwId]
+  )
+  const totalEntries = countRes.rows[0].total
+
+  return ok({
+    gameweek: gw,
+    total_entries: totalEntries,
+    events: evRes.rows.map(e => ({
+      id: e.id, fixture_name: e.fixture_name, event_type: e.event_type,
+      match_time: e.match_time, competition: e.competition,
+      options: optsByEvent[e.id] ?? [],
+    })),
+  })
+}
+
+// ── GET /glory/users/{id} ────────────────────────────────────────────────────
+async function getPublicProfile(event, user) {
+  const { id: targetId } = event.pathParameters
+  const pool = await getPool()
+
+  const userRes = await pool.query(
+    "SELECT id, display_name, avatar_url, created_at FROM users WHERE id=$1", [targetId]
+  )
+  if (!userRes.rows.length) return error(404, "User not found")
+  const targetUser = userRes.rows[0]
+
+  const divRes = await pool.query(
+    `SELECT uds.*, d.name AS division_name, d.icon, d.color_primary
+     FROM user_division_status uds JOIN divisions d ON d.id=uds.division_id
+     WHERE uds.user_id=$1`, [targetId]
+  )
+
+  const statsRes = await pool.query(
+    `SELECT COALESCE(SUM(total_correct_picks),0)::int AS lifetime_correct,
+            COALESCE(SUM(total_league_points),0)::int AS lifetime_lp,
+            COALESCE(SUM(perfect_weeks),0)::int AS total_perfect_weeks,
+            COUNT(*)::int AS sprints_played
+     FROM user_sprint_progress WHERE user_id=$1`, [targetId]
+  )
+
+  const historyRes = await pool.query(
+    `SELECT usp.total_league_points, usp.sprint_outcome, usp.is_rookie,
+            s.name AS sprint_name, s.start_date,
+            d.name AS division_name, d.icon AS division_icon
+     FROM user_sprint_progress usp
+     JOIN sprints s ON s.id=usp.sprint_id
+     LEFT JOIN divisions d ON d.id=usp.division_id
+     WHERE usp.user_id=$1 ORDER BY s.start_date DESC LIMIT 10`, [targetId]
+  )
+
+  const badgesRes = await pool.query(
+    `SELECT ub.earned_at, b.name, b.icon, b.description
+     FROM user_badges ub JOIN badges b ON b.id=ub.badge_id
+     WHERE ub.user_id=$1 ORDER BY ub.earned_at DESC LIMIT 20`, [targetId]
+  )
+
+  return ok({
+    user: targetUser,
+    division: divRes.rows[0] ?? null,
+    lifetime_stats: statsRes.rows[0],
+    sprint_history: historyRes.rows,
+    badges: badgesRes.rows,
+  })
 }
 
 // ── Badge helper ──────────────────────────────────────────────────────────────

@@ -502,6 +502,30 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/sprints
             Method: GET
+        GloryDivisions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/divisions
+            Method: GET
+        GloryMySprintsMy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/sprints/my
+            Method: GET
+        GloryCommunityPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/gameweek/{id}/community
+            Method: GET
+        GloryPublicProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/users/{id}
+            Method: GET
 
 Outputs:
   ApiUrl:
