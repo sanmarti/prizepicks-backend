@@ -106,18 +106,24 @@ async function getGloryStatus(event, user) {
     )
     sprintProgress = prog.rows[0] ?? null
 
-    // Current gameweek
-    const gwRes = await pool.query(
-      `SELECT g.*, COUNT(DISTINCT e.id)::int AS event_count
+    // All gameweeks for this sprint (for client-side navigation)
+    const allGwRes = await pool.query(
+      `SELECT g.id, g.sprint_week, g.status, g.lock_time,
+              COUNT(DISTINCT e.id)::int AS event_count
        FROM gameweeks g
        LEFT JOIN events e ON e.gameweek_id=g.id
-       WHERE g.sprint_id=$1 AND g.status IN ('PUBLISHED','LOCKED')
+       WHERE g.sprint_id=$1
        GROUP BY g.id
-       ORDER BY g.sprint_week ASC
-       LIMIT 1`,
+       ORDER BY g.sprint_week ASC`,
       [sprint.id]
     )
-    currentGameweek = gwRes.rows[0] ?? null
+    sprint.gameweeks = allGwRes.rows
+
+    // Current gameweek: prefer PUBLISHED (picks open) then LOCKED, then FINISHED
+    const published = allGwRes.rows.find(g => g.status === 'PUBLISHED')
+    const locked    = allGwRes.rows.find(g => g.status === 'LOCKED')
+    const finished  = [...allGwRes.rows].reverse().find(g => g.status === 'FINISHED')
+    currentGameweek = published ?? locked ?? finished ?? allGwRes.rows[0] ?? null
 
     // Next division
     const div = await pool.query(
