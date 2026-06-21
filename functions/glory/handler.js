@@ -1,7 +1,12 @@
+const axios                = require("axios")
 const { getPool }          = require("../../shared/db")
+const { getSecrets }       = require("../../shared/ssm")
 const { verifyToken, extractFromEvent } = require("../../shared/auth")
 const { ok, error, unauthorized } = require("../../shared/response")
 const { v4: uuidv4 }       = require("uuid")
+
+const API_FOOTBALL_BASE    = "https://v3.football.api-sports.io"
+const FINISHED_STATUSES    = ['FT', 'AET', 'PEN', 'AWD', 'WO']
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
@@ -26,6 +31,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/sprints/my")                 return await myRelevantSprints(event, user)
     if (routeKey === "GET /glory/gameweek/{id}/community")    return await getCommunityPicks(event, user)
     if (routeKey === "GET /glory/users/{id}")                 return await getPublicProfile(event, user)
+    if (routeKey === "GET /glory/fixtures/{id}/stats")        return await getFixtureStats(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -657,6 +663,103 @@ async function getPublicProfile(event, user) {
 }
 
 // ── Badge helper ──────────────────────────────────────────────────────────────
+// ── GET /glory/fixtures/{id}/stats ───────────────────────────────────────────
+async function getFixtureStats(event, user) {
+  const { id: fixtureId } = event.pathParameters
+  const pool = await getPool()
+
+  const fixRow = await pool.query(
+    `SELECT id, home_team, away_team, home_goals, away_goals, status_short, status_long,
+            status_elapsed, date, home_logo, away_logo, round, details_cached
+     FROM fixtures WHERE id=$1`, [fixtureId]
+  )
+  if (!fixRow.rows.length) return error(404, "Fixture not found")
+  const fx = fixRow.rows[0]
+
+  const isFinished = FINISHED_STATUSES.includes(fx.status_short)
+
+  const [evRows, stRows] = await Promise.all([
+    pool.query(
+      `SELECT elapsed, extra, team, team_logo, player, assist, type, detail
+       FROM fixture_events WHERE fixture_id=$1
+       ORDER BY elapsed ASC, extra ASC NULLS LAST`, [fixtureId]
+    ),
+    pool.query(
+      `SELECT team, team_logo, stat_type, stat_value
+       FROM fixture_statistics WHERE fixture_id=$1`, [fixtureId]
+    ),
+  ])
+
+  // If finished and not yet cached, fetch from API-Football once and store
+  if (isFinished && !fx.details_cached && evRows.rows.length === 0 && stRows.rows.length === 0) {
+    try {
+      const secrets = await getSecrets()
+      const headers = { "x-apisports-key": secrets.key }
+
+      const [evRes, stRes] = await Promise.all([
+        axios.get(`${API_FOOTBALL_BASE}/fixtures/events`,     { params: { fixture: fixtureId }, headers }),
+        axios.get(`${API_FOOTBALL_BASE}/fixtures/statistics`, { params: { fixture: fixtureId }, headers }),
+      ])
+
+      const apiEvents = (evRes.data?.response || []).map(e => ({
+        elapsed:   e.time.elapsed,
+        extra:     e.time.extra ?? null,
+        team:      e.team.name,
+        team_logo: e.team.logo,
+        player:    e.player.name,
+        assist:    e.assist?.name ?? null,
+        type:      e.type,
+        detail:    e.detail,
+      }))
+
+      const apiStats = (stRes.data?.response || []).flatMap(t =>
+        (t.statistics || []).map(s => ({
+          team: t.team.name, team_logo: t.team.logo,
+          stat_type: s.type, stat_value: s.value,
+        }))
+      )
+
+      for (const ev of apiEvents) {
+        await pool.query(
+          `INSERT INTO fixture_events (fixture_id,elapsed,extra,team,team_logo,player,assist,type,detail)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [fixtureId, ev.elapsed, ev.extra, ev.team, ev.team_logo, ev.player, ev.assist, ev.type, ev.detail]
+        )
+      }
+      for (const s of apiStats) {
+        await pool.query(
+          `INSERT INTO fixture_statistics (fixture_id,team,team_logo,stat_type,stat_value)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [fixtureId, s.team, s.team_logo, s.stat_type, s.stat_value]
+        )
+      }
+      await pool.query("UPDATE fixtures SET details_cached=true WHERE id=$1", [fixtureId])
+
+      const statsTeams = [...new Set(apiStats.map(r => r.team))]
+      const statistics = statsTeams.map(team => {
+        const rows = apiStats.filter(r => r.team === team)
+        return { team, team_logo: rows[0]?.team_logo, stats: rows.map(r => ({ type: r.stat_type, value: r.stat_value })) }
+      })
+      return ok({ fixture: fx, events: apiEvents, statistics, cached: false, source: 'api' })
+    } catch {
+      // Fall through to return empty (API failed or quota exceeded)
+    }
+  }
+
+  const statsTeams = [...new Set(stRows.rows.map(r => r.team))]
+  const statistics = statsTeams.map(team => {
+    const rows = stRows.rows.filter(r => r.team === team)
+    return { team, team_logo: rows[0]?.team_logo, stats: rows.map(r => ({ type: r.stat_type, value: r.stat_value })) }
+  })
+
+  return ok({
+    fixture: fx,
+    events:     evRows.rows,
+    statistics,
+    cached: evRows.rows.length > 0 || stRows.rows.length > 0,
+  })
+}
+
 async function awardBadge(pool, userId, code, sprintId, gameweekId) {
   const badge = await pool.query("SELECT id FROM badges WHERE code=$1 AND is_active=TRUE", [code])
   if (!badge.rows.length) return
