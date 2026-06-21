@@ -204,8 +204,8 @@ async function createGameweek(event) {
       const energyCost = opt.energy_cost
       if (!energyCost) continue
       await pool.query(
-        "INSERT INTO event_options (id, event_id, label, energy_cost) VALUES ($1,$2,$3,$4)",
-        [uuidv4(), eventId, opt.label, energyCost]
+        "INSERT INTO event_options (id, event_id, label, energy_cost, result_key) VALUES ($1,$2,$3,$4,$5)",
+        [uuidv4(), eventId, opt.label, energyCost, opt.result_key || null]
       )
     }
   }
@@ -277,8 +277,8 @@ async function updateGameweek(event) {
     for (const opt of (evDef.options || [])) {
       if (!opt.energy_cost) continue
       await pool.query(
-        "INSERT INTO event_options (id, event_id, label, energy_cost) VALUES ($1,$2,$3,$4)",
-        [uuidv4(), eventId, opt.label, opt.energy_cost]
+        "INSERT INTO event_options (id, event_id, label, energy_cost, result_key) VALUES ($1,$2,$3,$4,$5)",
+        [uuidv4(), eventId, opt.label, opt.energy_cost, opt.result_key || null]
       )
     }
   }
@@ -980,7 +980,7 @@ async function getSprint(event) {
       `SELECT e.id, e.event_type, e.fixture_id, e.fixture_name, e.player_name,
               e.competition, e.match_time,
               COALESCE(
-                json_agg(json_build_object('id',o.id,'label',o.label,'energy_cost',o.energy_cost)
+                json_agg(json_build_object('id',o.id,'label',o.label,'energy_cost',o.energy_cost,'result_key',o.result_key)
                   ORDER BY o.id) FILTER (WHERE o.id IS NOT NULL),
                 '[]'::json
               ) AS options
@@ -1115,8 +1115,8 @@ async function addSprintGameweek(event) {
     for (const opt of (evDef.options || [])) {
       if (!opt.label) continue
       await pool.query(
-        "INSERT INTO event_options (id, event_id, label, energy_cost) VALUES ($1,$2,$3,$4)",
-        [uuidv4(), eventId, opt.label, opt.energy_cost || 5]
+        "INSERT INTO event_options (id, event_id, label, energy_cost, result_key) VALUES ($1,$2,$3,$4,$5)",
+        [uuidv4(), eventId, opt.label, opt.energy_cost || 5, opt.result_key || null]
       )
     }
   }
