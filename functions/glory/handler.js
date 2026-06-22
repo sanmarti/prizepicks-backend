@@ -34,6 +34,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/gameweek/{id}/community")    return await getCommunityPicks(event, user)
     if (routeKey === "GET /glory/users/{id}")                 return await getPublicProfile(event, user)
     if (routeKey === "GET /glory/fixtures/{id}/stats")        return await getFixtureStats(event, user)
+    if (routeKey === "GET /glory/fixtures/{id}/form")         return await getFixtureForm(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -887,6 +888,58 @@ async function getFixtureStats(event, user) {
     events:     evRows.rows,
     statistics,
     cached: evRows.rows.length > 0 || stRows.rows.length > 0,
+  })
+}
+
+// ── GET /glory/fixtures/{id}/form ────────────────────────────────────────────
+async function getFixtureForm(event, user) {
+  const { id: fixtureId } = event.pathParameters
+  const pool = await getPool()
+
+  const fixRow = await pool.query(
+    `SELECT id, home_team, away_team, home_logo, away_logo, date FROM fixtures WHERE id=$1`,
+    [fixtureId]
+  )
+  if (!fixRow.rows.length) return error(404, "Fixture not found")
+  const fx = fixRow.rows[0]
+
+  const DONE = ['FT', 'AET', 'PEN', 'AWD', 'WO']
+
+  async function lastFive(team) {
+    const res = await pool.query(
+      `SELECT id, home_team, away_team, home_goals, away_goals, date, status_short,
+              home_logo, away_logo
+       FROM fixtures
+       WHERE (home_team = $1 OR away_team = $1)
+         AND status_short = ANY($2::text[])
+         AND date < $3
+       ORDER BY date DESC
+       LIMIT 5`,
+      [team, DONE, fx.date]
+    )
+    return res.rows.map(r => {
+      const isHome = r.home_team === team
+      const gf = isHome ? r.home_goals : r.away_goals
+      const ga = isHome ? r.away_goals : r.home_goals
+      const opponent      = isHome ? r.away_team : r.home_team
+      const opponent_logo = isHome ? r.away_logo  : r.home_logo
+      const result = gf > ga ? 'W' : gf < ga ? 'L' : 'D'
+      return { id: r.id, date: r.date, opponent, opponent_logo, gf, ga, result, home: isHome }
+    })
+  }
+
+  const [homeForm, awayForm] = await Promise.all([
+    lastFive(fx.home_team),
+    lastFive(fx.away_team),
+  ])
+
+  return ok({
+    home_team:  fx.home_team,
+    away_team:  fx.away_team,
+    home_logo:  fx.home_logo,
+    away_logo:  fx.away_logo,
+    home_form:  homeForm,
+    away_form:  awayForm,
   })
 }
 

@@ -569,6 +569,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/fixtures/{id}/stats
             Method: GET
+        GloryFixtureForm:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/fixtures/{id}/form
+            Method: GET
 
 Outputs:
   ApiUrl:
