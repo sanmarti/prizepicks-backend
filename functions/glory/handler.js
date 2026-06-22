@@ -123,11 +123,16 @@ async function getGloryStatus(event, user) {
     )
     sprint.gameweeks = allGwRes.rows
 
-    // Current gameweek: prefer PUBLISHED (picks open) then LOCKED, then FINISHED
-    const published = allGwRes.rows.find(g => g.status === 'PUBLISHED')
+    // Current gameweek: among PUBLISHED ones prefer the one whose lock_time is
+    // soonest in the future (i.e. the active week), then LOCKED, then last FINISHED
+    const now = new Date()
+    const publishedRows = allGwRes.rows.filter(g => g.status === 'PUBLISHED')
+    const activePub = publishedRows.find(g => new Date(g.lock_time) > now)
+      ?? publishedRows[publishedRows.length - 1]
+      ?? null
     const locked    = allGwRes.rows.find(g => g.status === 'LOCKED')
     const finished  = [...allGwRes.rows].reverse().find(g => g.status === 'FINISHED')
-    currentGameweek = published ?? locked ?? finished ?? allGwRes.rows[0] ?? null
+    currentGameweek = activePub ?? locked ?? finished ?? allGwRes.rows[0] ?? null
 
     // Next division
     const div = await pool.query(
