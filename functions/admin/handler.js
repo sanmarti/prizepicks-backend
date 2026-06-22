@@ -1700,12 +1700,54 @@ async function refreshFixtureResults(event) {
 }
 
 // Public — returns all fixtures for a given date grouped by competition.
-// Used by the user-facing live scores page.
+// Auto-refreshes from API-Football when non-finished fixtures are stale (>5 min).
 async function getPublicScores(event) {
-  const qs   = event.queryStringParameters || {}
-  const date = (qs.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10)
+  const qs    = event.queryStringParameters || {}
+  const date  = (qs.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10)
+  const today = new Date().toISOString().slice(0, 10)
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10)
 
   const pool = await getPool()
+
+  // Auto-refresh today's and yesterday's non-finished fixtures when stale
+  if (date === today || date === yesterday) {
+    try {
+      const staleRes = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM fixtures
+         WHERE date::date = $1
+           AND status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
+           AND (updated_at IS NULL OR updated_at < NOW() - INTERVAL '5 minutes')`,
+        [date]
+      )
+      if (parseInt(staleRes.rows[0].cnt) > 0) {
+        const secrets = await getSecrets()
+        const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+          params: { date },
+          headers: { "x-apisports-key": secrets.key },
+          timeout: 12000,
+        })
+        const apiFixtures = res.data?.response || []
+        if (apiFixtures.length > 0) {
+          // Build competition_id map from existing DB records
+          const leagueIds = [...new Set(apiFixtures.map(f => String(f.league.id)))]
+          const compsRes  = await pool.query(
+            `SELECT api_league_id, id FROM competitions WHERE api_league_id = ANY($1)`,
+            [leagueIds]
+          )
+          const compMap = {}
+          for (const c of compsRes.rows) compMap[c.api_league_id] = c.id
+
+          const rows = apiFixtures.map(f => apiFixtureToRow(f, compMap[String(f.league.id)] || null))
+          await upsertFixtures(pool, rows)
+          console.log(`[scores] auto-refreshed ${rows.length} fixtures for ${date}`)
+        }
+      }
+    } catch (e) {
+      // Fall through silently — return whatever is in the DB
+      console.error('[scores] auto-refresh failed:', e.message)
+    }
+  }
+
   const { rows } = await pool.query(
     `SELECT f.id, f.home_team, f.away_team, f.date,
             f.status_short, f.status_long, f.status_elapsed,
