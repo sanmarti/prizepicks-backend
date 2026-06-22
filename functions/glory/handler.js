@@ -187,7 +187,7 @@ async function getGameweekById(pool, gwId, user) {
 
   // Events with options, joined with fixture for venue info
   const evRes = await pool.query(
-    `SELECT e.*, f.venue_name, f.venue_city
+    `SELECT e.*, f.venue_name, f.venue_city, f.home_logo AS fixture_home_logo, f.away_logo AS fixture_away_logo
      FROM events e
      LEFT JOIN fixtures f ON f.id = e.fixture_id
      WHERE e.gameweek_id=$1 ORDER BY e.match_time ASC`, [gwId]
