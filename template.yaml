@@ -575,6 +575,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/fixtures/{id}/form
             Method: GET
+        GloryGameweekLive:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/gameweek/{id}/live
+            Method: GET
 
 Outputs:
   ApiUrl:

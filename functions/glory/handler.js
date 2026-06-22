@@ -35,6 +35,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/users/{id}")                 return await getPublicProfile(event, user)
     if (routeKey === "GET /glory/fixtures/{id}/stats")        return await getFixtureStats(event, user)
     if (routeKey === "GET /glory/fixtures/{id}/form")         return await getFixtureForm(event, user)
+    if (routeKey === "GET /glory/gameweek/{id}/live")         return await getGameweekLive(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -959,6 +960,60 @@ async function getFixtureForm(event, user) {
       home_form: [], away_form: [],
     })
   }
+}
+
+// ── GET /glory/gameweek/{id}/live ─────────────────────────────────────────────
+async function getGameweekLive(event, user) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  // Get all events for this gameweek with their fixture live data
+  const evRes = await pool.query(
+    `SELECT e.id AS event_id, e.event_type, e.fixture_id, e.status AS event_status,
+            e.match_time, e.player_name,
+            f.status_short, f.status_long, f.status_elapsed,
+            f.home_goals, f.away_goals, f.home_team, f.away_team,
+            f.updated_at AS fixture_updated_at
+     FROM events e
+     LEFT JOIN fixtures f ON f.id::text = e.fixture_id
+     WHERE e.gameweek_id=$1
+     ORDER BY e.match_time ASC`,
+    [id]
+  )
+
+  // Get option results for all events in this gameweek
+  const optRes = await pool.query(
+    `SELECT eo.id, eo.event_id, eo.label, eo.result, eo.result_key, eo.energy_cost
+     FROM event_options eo
+     JOIN events e ON e.id = eo.event_id
+     WHERE e.gameweek_id=$1`,
+    [id]
+  )
+  const optsByEvent = {}
+  for (const o of optRes.rows) {
+    if (!optsByEvent[o.event_id]) optsByEvent[o.event_id] = []
+    optsByEvent[o.event_id].push({ id: o.id, label: o.label, result: o.result, result_key: o.result_key, energy_cost: o.energy_cost })
+  }
+
+  const events = evRes.rows.map(e => ({
+    event_id: e.event_id,
+    event_type: e.event_type,
+    event_status: e.event_status,
+    match_time: e.match_time,
+    player_name: e.player_name,
+    fixture_id: e.fixture_id,
+    fixture_status_short: e.status_short,
+    fixture_status_long: e.status_long,
+    fixture_elapsed: e.status_elapsed,
+    home_goals: e.home_goals,
+    away_goals: e.away_goals,
+    home_team: e.home_team,
+    away_team: e.away_team,
+    fixture_updated_at: e.fixture_updated_at,
+    options: optsByEvent[e.event_id] || [],
+  }))
+
+  return ok({ events, fetched_at: new Date().toISOString() })
 }
 
 async function awardBadge(pool, userId, code, sprintId, gameweekId) {
