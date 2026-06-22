@@ -1713,10 +1713,11 @@ async function getPublicScores(event) {
   if (date === today || date === yesterday) {
     try {
       const staleRes = await pool.query(
-        `SELECT COUNT(*) AS cnt FROM fixtures
-         WHERE date::date = $1
-           AND status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
-           AND (updated_at IS NULL OR updated_at < NOW() - INTERVAL '5 minutes')`,
+        `SELECT COUNT(*) AS cnt FROM fixtures f
+         JOIN competitions c ON c.id = f.competition_id
+         WHERE f.date::date = $1
+           AND f.status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
+           AND (f.updated_at IS NULL OR f.updated_at < NOW() - INTERVAL '5 minutes')`,
         [date]
       )
       if (parseInt(staleRes.rows[0].cnt) > 0) {
@@ -1737,9 +1738,12 @@ async function getPublicScores(event) {
           const compMap = {}
           for (const c of compsRes.rows) compMap[c.api_league_id] = c.id
 
-          const rows = apiFixtures.map(f => apiFixtureToRow(f, compMap[String(f.league.id)] || null))
-          await upsertFixtures(pool, rows)
-          console.log(`[scores] auto-refreshed ${rows.length} fixtures for ${date}`)
+          // Only update fixtures belonging to imported competitions
+          const rows = apiFixtures
+            .filter(f => compMap[String(f.league.id)])
+            .map(f => apiFixtureToRow(f, compMap[String(f.league.id)]))
+          if (rows.length > 0) await upsertFixtures(pool, rows)
+          console.log(`[scores] auto-refreshed ${rows.length}/${apiFixtures.length} fixtures for ${date}`)
         }
       }
     } catch (e) {
@@ -1753,11 +1757,11 @@ async function getPublicScores(event) {
             f.status_short, f.status_long, f.status_elapsed,
             f.home_goals, f.away_goals, f.round,
             f.home_logo, f.away_logo,
-            COALESCE(c.name, f.league_name) AS competition_name,
+            c.name AS competition_name,
             c.logo_url AS competition_logo,
-            COALESCE(c.api_league_id::integer, f.api_league_id) AS api_league_id
+            c.api_league_id::integer AS api_league_id
      FROM fixtures f
-     LEFT JOIN competitions c ON c.id = f.competition_id
+     JOIN competitions c ON c.id = f.competition_id
      WHERE f.date::date = $1
      ORDER BY
        CASE
