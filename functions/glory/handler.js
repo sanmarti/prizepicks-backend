@@ -35,7 +35,9 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/users/{id}")                 return await getPublicProfile(event, user)
     if (routeKey === "GET /glory/fixtures/{id}/stats")        return await getFixtureStats(event, user)
     if (routeKey === "GET /glory/fixtures/{id}/form")         return await getFixtureForm(event, user)
-    if (routeKey === "GET /glory/gameweek/{id}/live")         return await getGameweekLive(event, user)
+    if (routeKey === "GET /glory/gameweek/{id}/live")              return await getGameweekLive(event, user)
+    if (routeKey === "GET /glory/energy-packs")                   return await listEnergyPacks(event, user)
+    if (routeKey === "POST /glory/energy-packs/{id}/purchase")    return await purchaseEnergyPack(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -1024,4 +1026,47 @@ async function awardBadge(pool, userId, code, sprintId, gameweekId) {
      VALUES ($1,$2,$3,$4)`,
     [userId, badge.rows[0].id, sprintId, gameweekId]
   ).catch(() => {})  // ignore duplicates
+}
+
+// ── GET /glory/energy-packs ───────────────────────────────────────────────────
+async function listEnergyPacks(event, user) {
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT * FROM energy_packs WHERE is_active=TRUE ORDER BY display_order ASC, price_euros ASC`
+  )
+  // Also return user's current wallet balance
+  const walletRes = await pool.query(
+    `SELECT COALESCE(balance, 0) AS balance FROM energy_wallets WHERE user_id=$1`, [user.id]
+  )
+  return ok({ packs: rows, wallet_balance: walletRes.rows[0]?.balance ?? 0 })
+}
+
+// ── POST /glory/energy-packs/{id}/purchase ────────────────────────────────────
+async function purchaseEnergyPack(event, user) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  const packRes = await pool.query(`SELECT * FROM energy_packs WHERE id=$1 AND is_active=TRUE`, [id])
+  if (!packRes.rows.length) return error(404, "Pack not found or unavailable")
+  const pack = packRes.rows[0]
+
+  // Upsert wallet and add energy
+  await pool.query(
+    `INSERT INTO energy_wallets (user_id, balance) VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE SET balance = energy_wallets.balance + $2`,
+    [user.id, pack.energy_amount]
+  )
+
+  // Log transaction
+  await pool.query(
+    `INSERT INTO energy_transactions (user_id, amount, type, description)
+     VALUES ($1, $2, 'PURCHASE', $3)`,
+    [user.id, pack.energy_amount, `Purchased: ${pack.name}`]
+  )
+
+  const newBalance = await pool.query(
+    `SELECT balance FROM energy_wallets WHERE user_id=$1`, [user.id]
+  )
+
+  return ok({ success: true, energy_added: pack.energy_amount, new_balance: newBalance.rows[0].balance })
 }

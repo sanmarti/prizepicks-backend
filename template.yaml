@@ -458,6 +458,30 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/rankings
             Method: GET
+        AdminEnergyPacksList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/energy-packs
+            Method: GET
+        AdminEnergyPacksCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/energy-packs
+            Method: POST
+        AdminEnergyPacksUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/energy-packs/{id}
+            Method: PUT
+        AdminEnergyPacksDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/energy-packs/{id}
+            Method: DELETE
         ListCompetitionsPublic:
           Type: HttpApi
           Properties:
@@ -581,6 +605,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/gameweek/{id}/live
             Method: GET
+        GloryEnergyPacksList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/energy-packs
+            Method: GET
+        GloryEnergyPacksPurchase:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/energy-packs/{id}/purchase
+            Method: POST
 
 Outputs:
   ApiUrl:

@@ -89,6 +89,11 @@ exports.handler = async (event) => {
     if (routeKey === "POST /admin/fixtures/refresh-results")           return await refreshFixtureResults(event)
     if (routeKey === "GET /admin/competitions/browse")                 return await browseCompetitions()
     if (routeKey === "POST /admin/competitions/import")                return await importCompetitionFromApi(event)
+    // ── Energy Packs ────────────────────────────────────────────────────────
+    if (routeKey === "GET /admin/energy-packs")          return await listEnergyPacks()
+    if (routeKey === "POST /admin/energy-packs")         return await createEnergyPack(event)
+    if (routeKey === "PUT /admin/energy-packs/{id}")     return await updateEnergyPack(event)
+    if (routeKey === "DELETE /admin/energy-packs/{id}")  return await deleteEnergyPack(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -1774,4 +1779,47 @@ async function getPublicScores(event) {
     [date]
   )
   return ok(rows)
+}
+
+// ── Energy Pack CRUD ──────────────────────────────────────────────────────────
+async function listEnergyPacks() {
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT * FROM energy_packs ORDER BY display_order ASC, price_euros ASC`
+  )
+  return ok(rows)
+}
+
+async function createEnergyPack(event) {
+  const pool = await getPool()
+  const { name, description, image_url, energy_amount, price_euros, discount_pct, is_active, display_order } = JSON.parse(event.body || '{}')
+  if (!name || !energy_amount) return error(400, "name and energy_amount are required")
+  const { rows } = await pool.query(
+    `INSERT INTO energy_packs (name, description, image_url, energy_amount, price_euros, discount_pct, is_active, display_order)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [name, description || null, image_url || null, energy_amount, price_euros ?? 0.99, discount_pct ?? 0, is_active !== false, display_order ?? 0]
+  )
+  return ok(rows[0])
+}
+
+async function updateEnergyPack(event) {
+  const pool = await getPool()
+  const { id } = event.pathParameters
+  const { name, description, image_url, energy_amount, price_euros, discount_pct, is_active, display_order } = JSON.parse(event.body || '{}')
+  const { rows } = await pool.query(
+    `UPDATE energy_packs SET
+       name=$1, description=$2, image_url=$3, energy_amount=$4,
+       price_euros=$5, discount_pct=$6, is_active=$7, display_order=$8
+     WHERE id=$9 RETURNING *`,
+    [name, description || null, image_url || null, energy_amount, price_euros, discount_pct, is_active, display_order, id]
+  )
+  if (!rows.length) return error(404, "Pack not found")
+  return ok(rows[0])
+}
+
+async function deleteEnergyPack(event) {
+  const pool = await getPool()
+  const { id } = event.pathParameters
+  await pool.query(`DELETE FROM energy_packs WHERE id=$1`, [id])
+  return ok({ deleted: true })
 }
