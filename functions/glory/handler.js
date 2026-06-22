@@ -903,44 +903,62 @@ async function getFixtureForm(event, user) {
   if (!fixRow.rows.length) return error(404, "Fixture not found")
   const fx = fixRow.rows[0]
 
-  const DONE = ['FT', 'AET', 'PEN', 'AWD', 'WO']
+  try {
+    const secrets = await getSecrets()
+    const headers = { "x-apisports-key": secrets.key }
 
-  async function lastFive(team) {
-    const res = await pool.query(
-      `SELECT id, home_team, away_team, home_goals, away_goals, date, status_short,
-              home_logo, away_logo
-       FROM fixtures
-       WHERE (home_team = $1 OR away_team = $1)
-         AND status_short = ANY($2::text[])
-         AND date < $3
-       ORDER BY date DESC
-       LIMIT 5`,
-      [team, DONE, fx.date]
-    )
-    return res.rows.map(r => {
-      const isHome = r.home_team === team
-      const gf = isHome ? r.home_goals : r.away_goals
-      const ga = isHome ? r.away_goals : r.home_goals
-      const opponent      = isHome ? r.away_team : r.home_team
-      const opponent_logo = isHome ? r.away_logo  : r.home_logo
-      const result = gf > ga ? 'W' : gf < ga ? 'L' : 'D'
-      return { id: r.id, date: r.date, opponent, opponent_logo, gf, ga, result, home: isHome }
+    // Fetch fixture from API to get team IDs
+    const fixRes = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+      params: { fixture: fixtureId },
+      headers, timeout: 8000,
+    })
+    const fixData = fixRes.data?.response?.[0]
+    if (!fixData) throw new Error('Fixture not in API')
+
+    const homeId = fixData.teams.home.id
+    const awayId = fixData.teams.away.id
+
+    // Fetch last 5 finished matches for each team in parallel
+    const [homeRes, awayRes] = await Promise.all([
+      axios.get(`${API_FOOTBALL_BASE}/fixtures`, { params: { team: homeId, last: 5 }, headers, timeout: 8000 }),
+      axios.get(`${API_FOOTBALL_BASE}/fixtures`, { params: { team: awayId, last: 5 }, headers, timeout: 8000 }),
+    ])
+
+    const DONE = new Set(['FT', 'AET', 'PEN', 'AWD', 'WO'])
+    function parseForm(fixtures, teamId) {
+      return (fixtures || [])
+        .filter(f => DONE.has(f.fixture.status.short))
+        .map(f => {
+          const isHome = f.teams.home.id === teamId
+          const gf = isHome ? f.goals.home : f.goals.away
+          const ga = isHome ? f.goals.away : f.goals.home
+          const result = gf > ga ? 'W' : gf < ga ? 'L' : 'D'
+          return {
+            date:          f.fixture.date,
+            opponent:      isHome ? f.teams.away.name : f.teams.home.name,
+            opponent_logo: isHome ? f.teams.away.logo : f.teams.home.logo,
+            gf, ga, result, home: isHome,
+          }
+        })
+        .reverse() // oldest → newest left-to-right
+    }
+
+    return ok({
+      home_team:  fixData.teams.home.name,
+      away_team:  fixData.teams.away.name,
+      home_logo:  fixData.teams.home.logo,
+      away_logo:  fixData.teams.away.logo,
+      home_form:  parseForm(homeRes.data?.response, homeId),
+      away_form:  parseForm(awayRes.data?.response, awayId),
+    })
+  } catch (e) {
+    console.error('[form] API-Football failed:', e.message)
+    return ok({
+      home_team: fx.home_team, away_team: fx.away_team,
+      home_logo: fx.home_logo, away_logo: fx.away_logo,
+      home_form: [], away_form: [],
     })
   }
-
-  const [homeForm, awayForm] = await Promise.all([
-    lastFive(fx.home_team),
-    lastFive(fx.away_team),
-  ])
-
-  return ok({
-    home_team:  fx.home_team,
-    away_team:  fx.away_team,
-    home_logo:  fx.home_logo,
-    away_logo:  fx.away_logo,
-    home_form:  homeForm,
-    away_form:  awayForm,
-  })
 }
 
 async function awardBadge(pool, userId, code, sprintId, gameweekId) {
