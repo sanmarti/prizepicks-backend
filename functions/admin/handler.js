@@ -1757,6 +1757,7 @@ async function getPublicScores(event) {
             f.status_short, f.status_long, f.status_elapsed,
             f.home_goals, f.away_goals, f.round,
             f.home_logo, f.away_logo,
+            f.venue_name, f.venue_city,
             c.name AS competition_name,
             c.logo_url AS competition_logo,
             c.api_league_id::integer AS api_league_id

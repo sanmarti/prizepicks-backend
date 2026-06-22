@@ -184,9 +184,12 @@ async function getGameweekById(pool, gwId, user) {
   if (!gwRes.rows.length) return error(404, "Gameweek not found")
   const gw = gwRes.rows[0]
 
-  // Events with options
+  // Events with options, joined with fixture for venue info
   const evRes = await pool.query(
-    "SELECT * FROM events WHERE gameweek_id=$1 ORDER BY match_time ASC", [gwId]
+    `SELECT e.*, f.venue_name, f.venue_city
+     FROM events e
+     LEFT JOIN fixtures f ON f.id = e.fixture_id
+     WHERE e.gameweek_id=$1 ORDER BY e.match_time ASC`, [gwId]
   )
   const optRes = await pool.query(
     `SELECT eo.* FROM event_options eo
@@ -198,6 +201,40 @@ async function getGameweekById(pool, gwId, user) {
     optsByEvent[o.event_id].push({
       id: o.id, label: o.label, energy_cost: o.energy_cost, result: o.result
     })
+  }
+
+  // For PLAYER_SCORE events, look up player team from fixture lineups
+  const playerEvents = evRes.rows.filter(e => e.event_type === 'PLAYER_SCORE' && e.fixture_id && e.player_name)
+  const lineupByFixture = {}
+  if (playerEvents.length > 0) {
+    const fixtureIds = [...new Set(playerEvents.map(e => e.fixture_id))]
+    const linRes = await pool.query(
+      `SELECT fixture_id, player_name, team, team_logo FROM fixture_lineups WHERE fixture_id=ANY($1)`,
+      [fixtureIds]
+    )
+    for (const row of linRes.rows) {
+      if (!lineupByFixture[row.fixture_id]) lineupByFixture[row.fixture_id] = []
+      lineupByFixture[row.fixture_id].push(row)
+    }
+  }
+
+  function normStr(s) {
+    return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim()
+  }
+  function findPlayerTeam(fixId, adminName) {
+    const lineups = lineupByFixture[fixId] || []
+    const na = normStr(adminName)
+    // Last name of admin entry (skip single-letter initials)
+    const naWords = na.split(' ').filter(w => w.length > 1)
+    const naLast = naWords[naWords.length - 1] || na
+    for (const row of lineups) {
+      const nb = normStr(row.player_name)
+      if (nb.includes(na) || na.includes(nb)) return { team: row.team, team_logo: row.team_logo }
+      const nbWords = nb.split(' ').filter(w => w.length > 1)
+      const nbLast = nbWords[nbWords.length - 1] || nb
+      if (naLast.length >= 3 && naLast === nbLast) return { team: row.team, team_logo: row.team_logo }
+    }
+    return null
   }
 
   // User's entry for this gameweek
@@ -220,10 +257,14 @@ async function getGameweekById(pool, gwId, user) {
   return ok({
     gameweek: {
       ...gw,
-      events: evRes.rows.map(e => ({
-        ...e,
-        options: optsByEvent[e.id] ?? [],
-      })),
+      events: evRes.rows.map(e => {
+        const extra = {}
+        if (e.event_type === 'PLAYER_SCORE' && e.player_name) {
+          const teamInfo = findPlayerTeam(e.fixture_id, e.player_name)
+          if (teamInfo) { extra.player_team = teamInfo.team; extra.player_team_logo = teamInfo.team_logo }
+        }
+        return { ...e, ...extra, options: optsByEvent[e.id] ?? [] }
+      }),
     },
     my_entry: entry,
     my_picks: myPicks,
@@ -238,8 +279,8 @@ async function submitPicks(event, user) {
   const body = JSON.parse(event.body || "{}")
   const { picks } = body  // [{ event_id, event_option_id }, ...]
 
-  if (!Array.isArray(picks) || picks.length !== 6)
-    return error(400, "Exactly 6 picks are required")
+  if (!Array.isArray(picks) || picks.length < 4 || picks.length > 6)
+    return error(400, "Between 4 and 6 picks are required")
 
   const pool = await getPool()
 
@@ -258,7 +299,7 @@ async function submitPicks(event, user) {
 
   // Validate all events belong to gameweek and options belong to events
   const uniqueEventIds = [...new Set(picks.map(p => p.event_id))]
-  if (uniqueEventIds.length !== 6) return error(400, "All 6 picks must be for different events")
+  if (uniqueEventIds.length !== picks.length) return error(400, "All picks must be for different events")
 
   const evRes = await pool.query(
     "SELECT id FROM events WHERE gameweek_id=$1 AND id=ANY($2::uuid[])",
