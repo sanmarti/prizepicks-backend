@@ -107,12 +107,30 @@ async function listUsers() {
   const { rows } = await pool.query(`
     SELECT
       u.id, u.email, u.display_name, u.role, u.created_at,
-      COALESCE(ew.balance, 0) AS energy_balance
+      COALESCE(ew.balance, 0)                                                           AS energy_balance,
+      COALESCE((SELECT SUM(et.amount) FROM energy_transactions et
+                WHERE et.user_id = u.id AND et.type = 'PURCHASE'), 0)::int             AS extra_energy,
+      COALESCE((SELECT COUNT(*) FROM user_sprint_progress usp
+                WHERE usp.user_id = u.id), 0)::int                                     AS sprints_played,
+      COALESCE((SELECT SUM(gameweeks_participated) FROM user_sprint_progress usp
+                WHERE usp.user_id = u.id), 0)::int                                     AS matchweeks_played,
+      COALESCE((SELECT SUM(total_correct_picks) FROM user_sprint_progress usp
+                WHERE usp.user_id = u.id), 0)::int                                     AS total_correct,
+      COALESCE((SELECT SUM(total_incorrect_picks) FROM user_sprint_progress usp
+                WHERE usp.user_id = u.id), 0)::int                                     AS total_incorrect,
+      (SELECT json_build_object('name', d.name, 'icon', d.icon, 'is_rookie', uds.is_rookie)
+       FROM user_division_status uds JOIN divisions d ON d.id = uds.division_id
+       WHERE uds.user_id = u.id LIMIT 1)                                               AS current_division
     FROM users u
     LEFT JOIN energy_wallets ew ON ew.user_id = u.id
     ORDER BY u.created_at DESC
   `)
-  return ok(rows)
+  return ok(rows.map(u => ({
+    ...u,
+    accuracy_pct: (u.total_correct + u.total_incorrect) > 0
+      ? Math.round((u.total_correct / (u.total_correct + u.total_incorrect)) * 100)
+      : null,
+  })))
 }
 
 async function getUserDetail(event) {
