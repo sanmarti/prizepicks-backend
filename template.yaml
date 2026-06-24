@@ -282,6 +282,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/users
             Method: GET
+        GetUserDetail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/users/{id}
+            Method: GET
         ListLeagues:
           Type: HttpApi
           Properties:

@@ -59,6 +59,7 @@ exports.handler = async (event) => {
     if (routeKey === "PUT /admin/gameweek/{id}")    return await updateGameweek(event)
     if (routeKey === "POST /admin/publish")         return await publishGameweek(event)
     if (routeKey === "GET /admin/users")            return await listUsers()
+    if (routeKey === "GET /admin/users/{id}")       return await getUserDetail(event)
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
     if (routeKey === "GET /admin/odds")             return await getOddsForFixture(event)
@@ -112,6 +113,97 @@ async function listUsers() {
     ORDER BY u.created_at DESC
   `)
   return ok(rows)
+}
+
+async function getUserDetail(event) {
+  const pool = await getPool()
+  const userId = event.pathParameters?.id
+  if (!userId) return error(400, 'Missing user id')
+
+  const [userRes, sprintRes, gameweekRes, divisionRes, historyRes] = await Promise.all([
+    // Base user + energy
+    pool.query(`
+      SELECT u.id, u.email, u.display_name, u.role, u.created_at,
+             COALESCE(ew.balance, 0) AS energy_balance
+      FROM users u
+      LEFT JOIN energy_wallets ew ON ew.user_id = u.id
+      WHERE u.id = $1
+    `, [userId]),
+
+    // Sprint stats: per-sprint breakdown
+    pool.query(`
+      SELECT
+        usp.sprint_id, s.name AS sprint_name, s.start_date, s.end_date, s.status AS sprint_status,
+        d.name AS division_name, d.icon AS division_icon,
+        usp.total_correct_picks, usp.total_incorrect_picks,
+        usp.total_league_points, usp.perfect_weeks,
+        usp.gameweeks_participated, usp.sprint_outcome, usp.settled_at
+      FROM user_sprint_progress usp
+      JOIN sprints s ON s.id = usp.sprint_id
+      LEFT JOIN divisions d ON d.id = usp.division_id
+      WHERE usp.user_id = $1
+      ORDER BY s.start_date DESC
+    `, [userId]),
+
+    // Total gameweek entries (matchweeks played)
+    pool.query(`
+      SELECT COUNT(*)::int AS total_matchweeks,
+             SUM(correct_picks)::int AS total_correct,
+             SUM(incorrect_picks)::int AS total_incorrect
+      FROM user_gameweek_entries
+      WHERE user_id = $1 AND status = 'completed'
+    `, [userId]),
+
+    // Current division
+    pool.query(`
+      SELECT d.id, d.name, d.icon, uds.is_rookie, uds.assigned_at
+      FROM user_division_status uds
+      JOIN divisions d ON d.id = uds.division_id
+      WHERE uds.user_id = $1
+    `, [userId]),
+
+    // Division history (promotion/relegation log)
+    pool.query(`
+      SELECT
+        prh.movement, prh.league_points, prh.created_at,
+        s.name AS sprint_name, s.start_date,
+        fd.name AS from_division, fd.icon AS from_icon,
+        td.name AS to_division, td.icon AS to_icon
+      FROM promotion_relegation_history prh
+      JOIN sprints s ON s.id = prh.sprint_id
+      LEFT JOIN divisions fd ON fd.id = prh.from_division_id
+      LEFT JOIN divisions td ON td.id = prh.to_division_id
+      WHERE prh.user_id = $1
+      ORDER BY prh.created_at DESC
+    `, [userId]),
+  ])
+
+  if (!userRes.rows.length) return error(404, 'User not found')
+
+  const user     = userRes.rows[0]
+  const sprints  = sprintRes.rows
+  const gw       = gameweekRes.rows[0]
+  const division = divisionRes.rows[0] ?? null
+  const history  = historyRes.rows
+
+  const totalCorrect   = gw.total_correct   ?? 0
+  const totalIncorrect = gw.total_incorrect ?? 0
+  const totalPicks     = totalCorrect + totalIncorrect
+  const accuracy       = totalPicks > 0 ? Math.round((totalCorrect / totalPicks) * 100) : null
+
+  return ok({
+    ...user,
+    stats: {
+      sprints_played:   sprints.length,
+      matchweeks_played: gw.total_matchweeks ?? 0,
+      total_correct:    totalCorrect,
+      total_incorrect:  totalIncorrect,
+      accuracy_pct:     accuracy,
+    },
+    current_division: division,
+    sprint_history:   sprints,
+    division_history: history,
+  })
 }
 
 async function listLeagues() {
