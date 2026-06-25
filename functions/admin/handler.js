@@ -58,6 +58,9 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/gameweek/{id}")    return await getGameweek(event)
     if (routeKey === "PUT /admin/gameweek/{id}")    return await updateGameweek(event)
     if (routeKey === "POST /admin/publish")         return await publishGameweek(event)
+    if (routeKey === "POST /admin/gameweeks/{id}/lock")    return await lockGameweek(event)
+    if (routeKey === "POST /admin/gameweeks/{id}/unlock")  return await unlockGameweek(event)
+    if (routeKey === "POST /admin/gameweeks/{id}/resolve")  return await resolveGameweek(event)
     if (routeKey === "GET /admin/users")            return await listUsers()
     if (routeKey === "GET /admin/users/{id}")       return await getUserDetail(event)
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
@@ -406,19 +409,32 @@ async function publishGameweek(event) {
   const pool = await getPool()
 
   const gwResult = await pool.query(
-    "SELECT id, competition_id, week_number FROM gameweeks WHERE id=$1 AND status='DRAFT'",
+    "SELECT id, competition_id, week_number, sprint_id FROM gameweeks WHERE id=$1 AND status='DRAFT'",
     [gameweek_id]
   )
   if (!gwResult.rows.length) return error(404, "Gameweek not found or not DRAFT")
-  const { competition_id, week_number } = gwResult.rows[0]
+  const { competition_id, week_number, sprint_id } = gwResult.rows[0]
 
   await pool.query("UPDATE gameweeks SET status='PUBLISHED' WHERE id=$1", [gameweek_id])
 
-  // Generate matchups for EVERY active league in this competition
-  const leaguesResult = await pool.query(
-    "SELECT id FROM leagues WHERE competition_id=$1 AND status='ACTIVE'",
-    [competition_id]
-  )
+  // If this gameweek belongs to a sprint that is still in draft, auto-promote it to
+  // 'scheduled' so the glory handler (which queries live/scheduled sprints) can find it.
+  // The admin can still explicitly activate to 'live' later to initialise sprint progress.
+  let sprintAutoScheduled = false
+  if (sprint_id) {
+    const sprintRes = await pool.query(
+      "SELECT id, status FROM sprints WHERE id=$1", [sprint_id]
+    )
+    if (sprintRes.rows.length && sprintRes.rows[0].status === 'draft') {
+      await pool.query("UPDATE sprints SET status='scheduled' WHERE id=$1", [sprint_id])
+      sprintAutoScheduled = true
+    }
+  }
+
+  // Generate matchups for EVERY active league in this competition (competition-based gameweeks only)
+  const leaguesResult = competition_id
+    ? await pool.query("SELECT id FROM leagues WHERE competition_id=$1 AND status='ACTIVE'", [competition_id])
+    : { rows: [] }
 
   let totalMatchups = 0
 
@@ -447,10 +463,163 @@ async function publishGameweek(event) {
   return ok({
     published: true,
     gameweek_id,
+    sprint_id: sprint_id ?? null,
+    sprint_auto_scheduled: sprintAutoScheduled,
     leagues_affected: leaguesResult.rows.length,
     matchupsCreated: totalMatchups
   })
 }
+
+// ── Lock gameweek (manual override) ──────────────────────────────────────────
+async function lockGameweek(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+  const gwRes = await pool.query("SELECT id, status FROM gameweeks WHERE id = $1", [id])
+  if (!gwRes.rows.length) return error(404, "Gameweek not found")
+  if (gwRes.rows[0].status !== 'PUBLISHED')
+    return error(400, `Cannot lock a gameweek in ${gwRes.rows[0].status} status — must be PUBLISHED`)
+
+  await pool.query("UPDATE gameweeks SET status = 'LOCKED' WHERE id = $1", [id])
+  await pool.query(
+    "UPDATE user_gameweek_entries SET status = 'locked' WHERE gameweek_id = $1 AND status = 'open'",
+    [id]
+  )
+  return ok({ locked: true, gameweek_id: id })
+}
+
+// ── Unlock gameweek (reset LOCKED → PUBLISHED so picks can be resubmitted) ───
+async function unlockGameweek(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+  const gwRes = await pool.query("SELECT id, status FROM gameweeks WHERE id = $1", [id])
+  if (!gwRes.rows.length) return error(404, "Gameweek not found")
+  if (gwRes.rows[0].status !== 'LOCKED')
+    return error(400, `Cannot unlock a gameweek in ${gwRes.rows[0].status} status — must be LOCKED`)
+
+  // Only allow unlock if no picks have been scored yet
+  const scoredPicks = await pool.query(
+    `SELECT COUNT(*)::int AS cnt FROM user_picks up
+     JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+     WHERE uge.gameweek_id = $1 AND up.pick_status IN ('WON','LOST')`,
+    [id]
+  )
+  if (scoredPicks.rows[0].cnt > 0)
+    return error(400, 'Cannot unlock — picks have already been scored')
+
+  await pool.query("UPDATE gameweeks SET status = 'PUBLISHED' WHERE id = $1", [id])
+  await pool.query(
+    "UPDATE user_gameweek_entries SET status = 'open' WHERE gameweek_id = $1 AND status = 'locked'",
+    [id]
+  )
+  return ok({ unlocked: true, gameweek_id: id })
+}
+
+// ── Resolve gameweek (admin manual trigger, same logic as scoring/handler.js resolve) ──
+async function resolveGameweek(event) {
+  const { id: gameweek_id } = event.pathParameters
+  const pool = await getPool()
+  const gwRes = await pool.query("SELECT id FROM gameweeks WHERE id = $1 AND status = 'LOCKED'", [gameweek_id])
+  if (!gwRes.rows.length) return error(404, "Gameweek not found or not in LOCKED status")
+
+  const DONE = ['FT', 'AET', 'PEN', 'AWD', 'WO']
+
+  const { rows: events } = await pool.query(
+    "SELECT id, event_type, fixture_id, player_name FROM events WHERE gameweek_id = $1",
+    [gameweek_id]
+  )
+
+  let skipped = 0
+  for (const ev of events) {
+    const fixture = ev.fixture_id
+      ? (await pool.query("SELECT home_goals, away_goals, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
+      : null
+    if (!fixture) { skipped++; continue }
+    if (!DONE.includes(fixture.status_short)) { skipped++; continue }
+
+    let cornerTotal = null
+    if (ev.event_type === 'CORNER_OVER') {
+      const cs = await pool.query(
+        `SELECT COALESCE(SUM(stat_value::int),0) AS total FROM fixture_statistics WHERE fixture_id=$1 AND stat_type='Corner Kicks'`,
+        [ev.fixture_id]
+      )
+      cornerTotal = cs.rows[0]?.total ?? 0
+    }
+
+    let scorers = []
+    if (ev.event_type === 'PLAYER_SCORE' && ev.player_name) {
+      const pe = await pool.query(
+        `SELECT player FROM fixture_events WHERE fixture_id=$1 AND type='Goal' AND (detail IS NULL OR detail NOT ILIKE '%own goal%')`,
+        [ev.fixture_id]
+      )
+      scorers = pe.rows.map(r => r.player || '')
+    }
+
+    const { rows: options } = await pool.query(
+      "SELECT id, label, result_key FROM event_options WHERE event_id = $1", [ev.id]
+    )
+    for (const opt of options) {
+      // Re-use evaluateOption from scoring/handler.js logic (inlined here to avoid cross-require)
+      const result = adminEvaluateOption(opt.result_key, opt.label, ev.event_type, fixture, cornerTotal, scorers, ev.player_name)
+      await pool.query("UPDATE event_options SET result=$1 WHERE id=$2", [result, opt.id])
+    }
+  }
+
+  // Score picks
+  const { rows: picks } = await pool.query(
+    `SELECT up.id AS pick_id, eo.result AS option_result FROM user_picks up
+     JOIN event_options eo ON eo.id=up.event_option_id
+     JOIN events e ON e.id=up.event_id WHERE e.gameweek_id=$1`, [gameweek_id]
+  )
+  for (const pick of picks) {
+    await pool.query("UPDATE user_picks SET pick_status=$1 WHERE id=$2",
+      [pick.option_result === 'WON' ? 'WON' : 'LOST', pick.pick_id])
+  }
+
+  await pool.query("UPDATE gameweeks SET status='FINISHED' WHERE id=$1", [gameweek_id])
+  return ok({ resolved: true, gameweek_id, skipped_events: skipped })
+}
+
+function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers, playerName) {
+  const lb = (label || '').toLowerCase()
+  const h = fixture.home_goals ?? 0, a = fixture.away_goals ?? 0
+  rk = rk || ''
+
+  if (eventType === 'MATCH_RESULT') {
+    if (rk === 'HOME_WIN'  || lb === 'home win')  return h > a ? 'WON' : 'LOST'
+    if (rk === 'AWAY_WIN'  || lb === 'away win')  return a > h ? 'WON' : 'LOST'
+    if (rk === 'DRAW'      || lb === 'draw')       return h === a ? 'WON' : 'LOST'
+  }
+  if (eventType === 'GOALS') {
+    const total = h + a, m = rk.match(/^(OVER|UNDER)_([\d.]+)$/)
+    if (m) { const t = parseFloat(m[2]); return m[1]==='OVER' ? (total>t?'WON':'LOST') : (total<t?'WON':'LOST') }
+  }
+  if (eventType === 'BTTS') {
+    const both = h > 0 && a > 0
+    if (rk === 'BTTS_YES') return both ? 'WON' : 'LOST'
+    if (rk === 'BTTS_NO')  return both ? 'LOST' : 'WON'
+  }
+  if (eventType === 'CLEAN_SHEET') {
+    if (rk === 'HOME_CLEAN_SHEET') return a === 0 ? 'WON' : 'LOST'
+    if (rk === 'AWAY_CLEAN_SHEET') return h === 0 ? 'WON' : 'LOST'
+  }
+  if (eventType === 'CORNER_OVER') {
+    const total = cornerTotal ?? 0, m = rk.match(/^CORNER_(OVER|UNDER)_([\d.]+)$/)
+    if (m) { const t = parseFloat(m[2]); return m[1]==='OVER' ? (total>t?'WON':'LOST') : (total<t?'WON':'LOST') }
+  }
+  if (eventType === 'PLAYER_SCORE' && playerName) {
+    const scored = (scorers||[]).some(s => {
+      const na = adminNorm(playerName), nb = adminNorm(s)
+      return na && nb && (na===nb || nb.includes(na) || na.includes(nb) || adminLastName(na)===adminLastName(nb))
+    })
+    if (rk === 'PLAYER_SCORES')   return scored ? 'WON' : 'LOST'
+    if (rk === 'PLAYER_NO_SCORE') return scored ? 'LOST' : 'WON'
+  }
+  return 'LOST'
+}
+function adminNorm(s) {
+  return (s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim()
+}
+function adminLastName(s) { const p=s.split(' ').filter(w=>w.length>1); return p[p.length-1]||'' }
 
 // ── Odds ─────────────────────────────────────────────────────────────────────
 
@@ -1188,14 +1357,22 @@ async function activateSprint(event) {
 async function addSprintGameweek(event) {
   const { id: sprintId } = event.pathParameters
   const b = JSON.parse(event.body || "{}")
-  const { sprint_week, lock_time, reveal_time, events: eventDefs } = b
+  const { sprint_week, events: eventDefs } = b
 
-  if (!sprint_week || !lock_time || !Array.isArray(eventDefs))
-    return error(400, "sprint_week, lock_time, and events are required")
+  if (!sprint_week || !Array.isArray(eventDefs))
+    return error(400, "sprint_week and events are required")
   if (sprint_week < 1 || sprint_week > 4)
     return error(400, "sprint_week must be between 1 and 4")
   if (eventDefs.length > 15)
     return error(400, "Maximum 15 events allowed")
+
+  // Auto-calculate lock_time: 1 hour before earliest match_time
+  const matchTimes = eventDefs
+    .map(e => e.match_time ? new Date(e.match_time).getTime() : null)
+    .filter(t => t !== null && !isNaN(t))
+  const lock_time = matchTimes.length > 0
+    ? new Date(Math.min(...matchTimes) - 60 * 60 * 1000).toISOString()
+    : null
 
   const pool = await getPool()
   const sprint = await pool.query("SELECT id FROM sprints WHERE id=$1", [sprintId])
@@ -1215,8 +1392,8 @@ async function addSprintGameweek(event) {
   const gwId = uuidv4()
   await pool.query(
     `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status)
-     VALUES ($1,$2,$3,$3,$4,$5,'DRAFT')`,
-    [gwId, sprintId, sprint_week, lock_time, reveal_time || lock_time]
+     VALUES ($1,$2,$3,$3,$4,$4,'DRAFT')`,
+    [gwId, sprintId, sprint_week, lock_time]
   )
 
   for (const evDef of eventDefs) {
@@ -1900,14 +2077,25 @@ async function listEnergyPacks() {
   return ok(rows)
 }
 
+function validatePackImage(image_url) {
+  if (!image_url || image_url === '') return null          // allow clearing
+  if (image_url.startsWith('http://') || image_url.startsWith('https://')) return image_url
+  if (!image_url.startsWith('data:image/')) return 'INVALID_FORMAT'
+  if (image_url.length > 400 * 1024) return 'TOO_LARGE'  // 400 KB cap for pack images
+  return image_url
+}
+
 async function createEnergyPack(event) {
   const pool = await getPool()
   const { name, description, image_url, energy_amount, price_euros, discount_pct, is_active, display_order } = JSON.parse(event.body || '{}')
   if (!name || !energy_amount) return error(400, "name and energy_amount are required")
+  const img = validatePackImage(image_url)
+  if (img === 'INVALID_FORMAT') return error(400, "Invalid image format")
+  if (img === 'TOO_LARGE')      return error(400, "Image too large (max 400 KB)")
   const { rows } = await pool.query(
     `INSERT INTO energy_packs (name, description, image_url, energy_amount, price_euros, discount_pct, is_active, display_order)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [name, description || null, image_url || null, energy_amount, price_euros ?? 0.99, discount_pct ?? 0, is_active !== false, display_order ?? 0]
+    [name, description || null, img, energy_amount, price_euros ?? 0.99, discount_pct ?? 0, is_active !== false, display_order ?? 0]
   )
   return ok(rows[0])
 }
@@ -1916,12 +2104,15 @@ async function updateEnergyPack(event) {
   const pool = await getPool()
   const { id } = event.pathParameters
   const { name, description, image_url, energy_amount, price_euros, discount_pct, is_active, display_order } = JSON.parse(event.body || '{}')
+  const img = validatePackImage(image_url)
+  if (img === 'INVALID_FORMAT') return error(400, "Invalid image format")
+  if (img === 'TOO_LARGE')      return error(400, "Image too large (max 400 KB)")
   const { rows } = await pool.query(
     `UPDATE energy_packs SET
        name=$1, description=$2, image_url=$3, energy_amount=$4,
        price_euros=$5, discount_pct=$6, is_active=$7, display_order=$8
      WHERE id=$9 RETURNING *`,
-    [name, description || null, image_url || null, energy_amount, price_euros, discount_pct, is_active, display_order, id]
+    [name, description || null, img, energy_amount, price_euros, discount_pct, is_active, display_order, id]
   )
   if (!rows.length) return error(404, "Pack not found")
   return ok(rows[0])
