@@ -14,7 +14,8 @@ exports.handler = async (event) => {
 
   let user
   try {
-    user = await verifyToken(extractFromEvent(event))
+    const payload = await verifyToken(extractFromEvent(event))
+    user = { ...payload, id: payload.id || payload.userId }
   } catch {
     return unauthorized()
   }
@@ -38,6 +39,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/gameweek/{id}/live")              return await getGameweekLive(event, user)
     if (routeKey === "GET /glory/energy-packs")                   return await listEnergyPacks(event, user)
     if (routeKey === "POST /glory/energy-packs/{id}/purchase")    return await purchaseEnergyPack(event, user)
+    if (routeKey === "GET /glory/purchase-history")               return await getPurchaseHistory(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -90,9 +92,24 @@ async function getGloryStatus(event, user) {
   const pool = await getPool()
   const divStatus = await ensureDivisionStatus(pool, user.id)
 
-  // Current live/scheduled sprint
+  // Find the most relevant sprint: prefer sprints that have PUBLISHED or LOCKED gameweeks
+  // (so an old 'live' sprint with all GWs finished doesn't shadow a new sprint where picks are open).
+  // Also include draft sprints that have at least one PUBLISHED gameweek (admin published but hasn't activated yet).
   const sprintRes = await pool.query(
-    "SELECT * FROM sprints WHERE status IN ('live','scheduled') ORDER BY start_date ASC LIMIT 1"
+    `SELECT s.* FROM sprints s
+     WHERE s.status IN ('live','scheduled')
+        OR (s.status = 'draft' AND EXISTS (
+              SELECT 1 FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED')
+           ))
+     ORDER BY
+       -- Sprints with an open (PUBLISHED/LOCKED) gameweek come first
+       CASE WHEN EXISTS (
+         SELECT 1 FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED')
+       ) THEN 0 ELSE 1 END,
+       -- Among ties: live > scheduled > draft
+       CASE WHEN s.status='live' THEN 0 WHEN s.status='scheduled' THEN 1 ELSE 2 END,
+       s.start_date ASC
+     LIMIT 1`
   )
   const sprint = sprintRes.rows[0] ?? null
 
@@ -122,6 +139,7 @@ async function getGloryStatus(event, user) {
       [sprint.id]
     )
     sprint.gameweeks = allGwRes.rows
+    sprint.gameweek_count = allGwRes.rows.reduce((max, g) => Math.max(max, g.sprint_week || 0), 0)
 
     // Current gameweek: among PUBLISHED ones prefer the one whose lock_time is
     // soonest in the future (i.e. the active week), then LOCKED, then last FINISHED
@@ -197,7 +215,7 @@ async function getGameweekById(pool, gwId, user) {
   const evRes = await pool.query(
     `SELECT e.*, f.venue_name, f.venue_city, f.home_logo AS fixture_home_logo, f.away_logo AS fixture_away_logo
      FROM events e
-     LEFT JOIN fixtures f ON f.id = e.fixture_id
+     LEFT JOIN fixtures f ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      WHERE e.gameweek_id=$1 ORDER BY e.match_time ASC`, [gwId]
   )
   const optRes = await pool.query(
@@ -218,7 +236,7 @@ async function getGameweekById(pool, gwId, user) {
   if (playerEvents.length > 0) {
     const fixtureIds = [...new Set(playerEvents.map(e => e.fixture_id))]
     const linRes = await pool.query(
-      `SELECT fixture_id, player_name, team, team_logo FROM fixture_lineups WHERE fixture_id=ANY($1)`,
+      `SELECT fixture_id, player_name, team, team_logo FROM fixture_lineups WHERE fixture_id::text=ANY($1)`,
       [fixtureIds]
     )
     for (const row of linRes.rows) {
@@ -288,8 +306,8 @@ async function submitPicks(event, user) {
   const body = JSON.parse(event.body || "{}")
   const { picks } = body  // [{ event_id, event_option_id }, ...]
 
-  if (!Array.isArray(picks) || picks.length < 4 || picks.length > 6)
-    return error(400, "Between 4 and 6 picks are required")
+  if (!Array.isArray(picks) || picks.length !== 6)
+    return error(400, "Exactly 6 picks are required")
 
   const pool = await getPool()
 
@@ -314,14 +332,14 @@ async function submitPicks(event, user) {
     "SELECT id FROM events WHERE gameweek_id=$1 AND id=ANY($2::uuid[])",
     [gwId, uniqueEventIds]
   )
-  if (evRes.rows.length !== 6) return error(400, "One or more events do not belong to this gameweek")
+  if (evRes.rows.length !== uniqueEventIds.length) return error(400, "One or more events do not belong to this gameweek")
 
   const optionIds = picks.map(p => p.event_option_id)
   const optRes = await pool.query(
     "SELECT id, event_id FROM event_options WHERE id=ANY($1::uuid[])",
     [optionIds]
   )
-  if (optRes.rows.length !== 6) return error(400, "One or more event options not found")
+  if (optRes.rows.length !== picks.length) return error(400, "One or more event options not found")
 
   // Validate each option belongs to its event
   const optMap = {}
@@ -573,6 +591,50 @@ async function getSprintDetail(event, user) {
     rankings = rankRes.rows
   }
 
+  // Overall ranking across all divisions (always returned for any sprint status)
+  let overall_ranking = []
+  const { rows: overallRows } = await pool.query(
+    `SELECT usp.user_id, u.display_name, u.avatar_url,
+            usp.total_league_points, usp.total_correct_picks, usp.total_incorrect_picks,
+            usp.perfect_weeks, usp.sprint_outcome, usp.division_id,
+            d.name AS division_name, d.icon AS division_icon,
+            RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS division_rank,
+            RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS overall_rank
+     FROM user_sprint_progress usp
+     JOIN users u ON u.id = usp.user_id
+     LEFT JOIN divisions d ON d.id = usp.division_id
+     WHERE usp.sprint_id = $1
+     ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC`,
+    [sprintId]
+  )
+  overall_ranking = overallRows
+
+  // If user has no progress record but we have overall rankings, try to give them division rankings
+  // from the most-populated division so the UI has something to show
+  if (!progress?.division_id && overall_ranking.length > 0 && rankings.length === 0) {
+    const divCounts = {}
+    for (const r of overall_ranking) {
+      if (r.division_id) divCounts[r.division_id] = (divCounts[r.division_id] || 0) + 1
+    }
+    const topDivId = Object.entries(divCounts).sort((a, b) => b[1] - a[1])[0]?.[0]
+    if (topDivId) {
+      const divRes = await pool.query("SELECT * FROM divisions WHERE id=$1", [topDivId])
+      division = divRes.rows[0] ?? null
+      const rankRes = await pool.query(
+        `SELECT usp.user_id, u.display_name, u.avatar_url,
+                usp.total_league_points, usp.total_correct_picks, usp.total_incorrect_picks,
+                usp.perfect_weeks, usp.sprint_outcome,
+                RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS rank
+         FROM user_sprint_progress usp
+         JOIN users u ON u.id = usp.user_id
+         WHERE usp.sprint_id=$1 AND usp.division_id=$2
+         ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC`,
+        [sprintId, topDivId]
+      )
+      rankings = rankRes.rows
+    }
+  }
+
   const gwRes = await pool.query(
     `SELECT g.*,
        uge.id AS entry_id, uge.correct_picks, uge.incorrect_picks,
@@ -612,7 +674,7 @@ async function getSprintDetail(event, user) {
     })
   }
 
-  return ok({ sprint, progress, division, rankings, gameweeks })
+  return ok({ sprint, progress, division, rankings, overall_ranking, gameweeks })
 }
 
 // ── GET /glory/sprints ────────────────────────────────────────────────────────
@@ -653,7 +715,20 @@ async function myRelevantSprints(event, user) {
        usp.division_id,
        d.name AS division_name, d.icon AS division_icon, d.color_primary,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
-       (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks
+       (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks,
+       -- User's rank within their division for this sprint
+       CASE WHEN usp.division_id IS NOT NULL THEN (
+         SELECT COUNT(*)::int + 1
+         FROM user_sprint_progress usp2
+         WHERE usp2.sprint_id = s.id AND usp2.division_id = usp.division_id
+           AND (usp2.total_league_points > usp.total_league_points
+             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks > usp.total_correct_picks))
+       ) END AS my_rank,
+       -- Total players in this division
+       CASE WHEN usp.division_id IS NOT NULL THEN (
+         SELECT COUNT(*)::int FROM user_sprint_progress usp2
+         WHERE usp2.sprint_id = s.id AND usp2.division_id = usp.division_id
+       ) END AS total_players
      FROM sprints s
      LEFT JOIN user_sprint_progress usp ON usp.sprint_id=s.id AND usp.user_id=$1
      LEFT JOIN divisions d ON d.id=usp.division_id
@@ -677,7 +752,33 @@ async function myRelevantSprints(event, user) {
     [currentMonthStart.toISOString(), twoMonthsEnd.toISOString()]
   )
 
-  return ok({ past: pastRows, upcoming: futureRows })
+  // Include gameweeks (with user entry) for live/scheduled sprints so the week schedule shows real status
+  const liveIds = pastRows.filter(s => s.status === 'live' || s.status === 'scheduled').map(s => s.id)
+  let gwBySprintId = {}
+  if (liveIds.length > 0) {
+    const { rows: gwRows } = await pool.query(
+      `SELECT g.id, g.sprint_id, g.sprint_week, g.status, g.lock_time,
+              uge.league_points, uge.correct_picks, uge.incorrect_picks, uge.is_perfect_week
+       FROM gameweeks g
+       LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id=g.id AND uge.user_id=$1
+       WHERE g.sprint_id = ANY($2) AND g.status != 'DRAFT'
+       ORDER BY g.sprint_week ASC`,
+      [user.id, liveIds]
+    )
+    for (const gw of gwRows) {
+      if (!gwBySprintId[gw.sprint_id]) gwBySprintId[gw.sprint_id] = []
+      gwBySprintId[gw.sprint_id].push({
+        id: gw.id, sprint_week: gw.sprint_week, status: gw.status, lock_time: gw.lock_time,
+        entry: gw.league_points != null ? {
+          league_points: gw.league_points, correct_picks: gw.correct_picks,
+          incorrect_picks: gw.incorrect_picks, is_perfect_week: gw.is_perfect_week,
+        } : null,
+      })
+    }
+  }
+
+  const sprints = pastRows.map(s => ({ ...s, gameweeks: gwBySprintId[s.id] || [] }))
+  return ok({ past: sprints, upcoming: futureRows })
 }
 
 // ── GET /glory/gameweek/{id}/community ───────────────────────────────────────
@@ -1074,4 +1175,29 @@ async function purchaseEnergyPack(event, user) {
   )
 
   return ok({ success: true, energy_added: pack.energy_amount, new_balance: newBalance.rows[0].balance })
+}
+
+// ── GET /glory/purchase-history ───────────────────────────────────────────────
+async function getPurchaseHistory(event, user) {
+  const pool = await getPool()
+
+  const [walletRes, txRes] = await Promise.all([
+    pool.query(
+      `SELECT COALESCE(balance, 0) AS balance FROM energy_wallets WHERE user_id=$1`,
+      [user.id]
+    ),
+    pool.query(
+      `SELECT id, amount, type, description, created_at
+       FROM energy_transactions
+       WHERE user_id=$1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [user.id]
+    ),
+  ])
+
+  return ok({
+    wallet_balance: walletRes.rows[0]?.balance ?? 0,
+    transactions: txRes.rows,
+  })
 }

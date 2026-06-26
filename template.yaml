@@ -452,6 +452,24 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/sprints/{id}/settle
             Method: POST
+        LockGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweeks/{id}/lock
+            Method: POST
+        ResolveGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweeks/{id}/resolve
+            Method: POST
+        UnlockGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweeks/{id}/unlock
+            Method: POST
         ActivateSprint:
           Type: HttpApi
           Properties:
@@ -500,12 +518,33 @@ Resources:
             ApiId: !Ref PublicApi
             Path: /scores
             Method: GET
+        PublicGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PublicApi
+            Path: /public/gameweek
+            Method: GET
         Scores:
           Type: HttpApi
           Properties:
             ApiId: !Ref PrizePicksApi
             Path: /scores
             Method: GET
+
+  # --- LIFECYCLE (scheduled automation) ---
+  LifecycleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-lifecycle-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
+      Handler: functions/lifecycle/handler.handler
+      Timeout: 120
+      Events:
+        LifecycleCron:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Enabled: true
 
   # --- 6 TO GLORY (user-facing) ---
   GloryFunction:
@@ -623,6 +662,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/energy-packs/{id}/purchase
             Method: POST
+        GloryPurchaseHistory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/purchase-history
+            Method: GET
 
 Outputs:
   ApiUrl:
