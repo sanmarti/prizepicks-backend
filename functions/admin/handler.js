@@ -42,6 +42,10 @@ exports.handler = async (event) => {
     try { return await getPublicScores(event) }
     catch (err) { console.error(err); return error(500, "Internal server error") }
   }
+  if (routeKey === "GET /public/gameweek") {
+    try { return await getPublicGameweek() }
+    catch (err) { console.error(err); return error(500, "Internal server error") }
+  }
 
   let user
   try {
@@ -141,7 +145,7 @@ async function getUserDetail(event) {
   const userId = event.pathParameters?.id
   if (!userId) return error(400, 'Missing user id')
 
-  const [userRes, sprintRes, gameweekRes, divisionRes, historyRes] = await Promise.all([
+  const [userRes, sprintRes, gameweekRes, divisionRes, historyRes, matchweekRes] = await Promise.all([
     // Base user + energy
     pool.query(`
       SELECT u.id, u.email, u.display_name, u.role, u.created_at,
@@ -197,15 +201,30 @@ async function getUserDetail(event) {
       WHERE prh.user_id = $1
       ORDER BY prh.created_at DESC
     `, [userId]),
+
+    // Per-matchweek entries
+    pool.query(`
+      SELECT
+        uge.id, uge.status, uge.picks_submitted, uge.correct_picks, uge.incorrect_picks,
+        uge.league_points, uge.is_perfect_week, uge.settled_at, uge.created_at,
+        g.sprint_week, g.lock_time,
+        s.name AS sprint_name, s.id AS sprint_id
+      FROM user_gameweek_entries uge
+      JOIN gameweeks g ON g.id = uge.gameweek_id
+      LEFT JOIN sprints s ON s.id = uge.sprint_id
+      WHERE uge.user_id = $1
+      ORDER BY COALESCE(g.lock_time, uge.created_at) DESC
+    `, [userId]),
   ])
 
   if (!userRes.rows.length) return error(404, 'User not found')
 
-  const user     = userRes.rows[0]
-  const sprints  = sprintRes.rows
-  const gw       = gameweekRes.rows[0]
-  const division = divisionRes.rows[0] ?? null
-  const history  = historyRes.rows
+  const user          = userRes.rows[0]
+  const sprints       = sprintRes.rows
+  const gw            = gameweekRes.rows[0]
+  const division      = divisionRes.rows[0] ?? null
+  const history       = historyRes.rows
+  const matchweeks    = matchweekRes.rows
 
   const totalCorrect   = gw.total_correct   ?? 0
   const totalIncorrect = gw.total_incorrect ?? 0
@@ -222,8 +241,9 @@ async function getUserDetail(event) {
       accuracy_pct:     accuracy,
     },
     current_division: division,
-    sprint_history:   sprints,
-    division_history: history,
+    sprint_history:    sprints,
+    division_history:  history,
+    matchweek_history: matchweeks,
   })
 }
 
@@ -506,12 +526,22 @@ async function unlockGameweek(event) {
   if (scoredPicks.rows[0].cnt > 0)
     return error(400, 'Cannot unlock — picks have already been scored')
 
-  await pool.query("UPDATE gameweeks SET status = 'PUBLISHED' WHERE id = $1", [id])
-  await pool.query(
-    "UPDATE user_gameweek_entries SET status = 'open' WHERE gameweek_id = $1 AND status = 'locked'",
-    [id]
+  // Recalculate lock_time from events so the lifecycle won't immediately re-lock it
+  const { rows: evs } = await pool.query(
+    "SELECT match_time FROM events WHERE gameweek_id = $1 AND match_time IS NOT NULL ORDER BY match_time ASC", [id]
   )
-  return ok({ unlocked: true, gameweek_id: id })
+  const newLockTime = evs.length > 0
+    ? new Date(new Date(evs[0].match_time).getTime() - 60 * 60 * 1000).toISOString()
+    : null
+
+  await pool.query(
+    `UPDATE gameweeks SET status = 'PUBLISHED'${newLockTime ? ', lock_time = $2, reveal_time = $2' : ''} WHERE id = $1`,
+    newLockTime ? [id, newLockTime] : [id]
+  )
+  await pool.query(
+    "UPDATE user_gameweek_entries SET status = 'open' WHERE gameweek_id = $1 AND status = 'locked'", [id]
+  )
+  return ok({ unlocked: true, gameweek_id: id, lock_time: newLockTime })
 }
 
 // ── Resolve gameweek (admin manual trigger, same logic as scoring/handler.js resolve) ──
@@ -1292,7 +1322,9 @@ async function getSprint(event) {
     [id]
   )
 
-  return ok({ ...sprint, gameweeks: gwRes.rows, stats: statsRes.rows[0] })
+  const maxSprintWeek = gwRes.rows.reduce((max, g) => Math.max(max, g.sprint_week || 0), 0)
+  const effectiveGwCount = Math.max(sprint.gameweek_count || 4, maxSprintWeek)
+  return ok({ ...sprint, gameweek_count: effectiveGwCount, gameweeks: gwRes.rows, stats: statsRes.rows[0] })
 }
 
 async function updateSprint(event) {
@@ -1361,8 +1393,8 @@ async function addSprintGameweek(event) {
 
   if (!sprint_week || !Array.isArray(eventDefs))
     return error(400, "sprint_week and events are required")
-  if (sprint_week < 1 || sprint_week > 4)
-    return error(400, "sprint_week must be between 1 and 4")
+  if (sprint_week < 1 || sprint_week > 10)
+    return error(400, "sprint_week must be between 1 and 10")
   if (eventDefs.length > 15)
     return error(400, "Maximum 15 events allowed")
 
@@ -1378,23 +1410,37 @@ async function addSprintGameweek(event) {
   const sprint = await pool.query("SELECT id FROM sprints WHERE id=$1", [sprintId])
   if (!sprint.rows.length) return error(404, "Sprint not found")
 
-  // If a DRAFT or PUBLISHED already exists for this week, replace it
+  // If a DRAFT or PUBLISHED already exists for this week, update it in place
+  // (DELETE would fail if user_badges/user_cards reference the gameweek without CASCADE)
   const existing = await pool.query(
     "SELECT id, status FROM gameweeks WHERE sprint_id=$1 AND sprint_week=$2",
     [sprintId, sprint_week]
   )
+
+  let gwId
   if (existing.rows.length) {
     if (!['DRAFT', 'PUBLISHED'].includes(existing.rows[0].status))
       return error(409, `Sprint week ${sprint_week} already has a ${existing.rows[0].status} gameweek`)
-    await pool.query("DELETE FROM gameweeks WHERE id=$1", [existing.rows[0].id])
+    gwId = existing.rows[0].id
+    // Update lock_time and reset to DRAFT; preserve the row to keep FK references intact
+    if (lock_time) {
+      await pool.query(
+        `UPDATE gameweeks SET lock_time=$1, reveal_time=$1, status='DRAFT' WHERE id=$2`,
+        [lock_time, gwId]
+      )
+    } else {
+      await pool.query(`UPDATE gameweeks SET status='DRAFT' WHERE id=$1`, [gwId])
+    }
+    // Remove old events (CASCADE deletes event_options)
+    await pool.query("DELETE FROM events WHERE gameweek_id=$1", [gwId])
+  } else {
+    gwId = uuidv4()
+    await pool.query(
+      `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status)
+       VALUES ($1,$2,$3,$3,$4,$4,'DRAFT')`,
+      [gwId, sprintId, sprint_week, lock_time]
+    )
   }
-
-  const gwId = uuidv4()
-  await pool.query(
-    `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status)
-     VALUES ($1,$2,$3,$3,$4,$4,'DRAFT')`,
-    [gwId, sprintId, sprint_week, lock_time]
-  )
 
   for (const evDef of eventDefs) {
     const eventId = uuidv4()
@@ -1413,7 +1459,7 @@ async function addSprintGameweek(event) {
     }
   }
 
-  return ok({ gameweek_id: gwId, sprint_id: sprintId, sprint_week }, 201)
+  return ok({ gameweek_id: gwId, sprint_id: sprintId, sprint_week })
 }
 
 async function removeSprintGameweek(event) {
@@ -2123,4 +2169,92 @@ async function deleteEnergyPack(event) {
   const { id } = event.pathParameters
   await pool.query(`DELETE FROM energy_packs WHERE id=$1`, [id])
   return ok({ deleted: true })
+}
+
+// ── GET /public/gameweek — no auth, used by the landing page demo ─────────────
+async function getPublicGameweek() {
+  const pool = await getPool()
+
+  // Find the current active gameweek (live sprint, published or locked)
+  const gwRes = await pool.query(`
+    SELECT g.*, s.name AS sprint_name, s.id AS sprint_id,
+           s.start_date, s.end_date, s.status AS sprint_status
+    FROM gameweeks g
+    JOIN sprints s ON s.id = g.sprint_id
+    WHERE s.status = 'live'
+      AND g.status IN ('PUBLISHED', 'LOCKED')
+    ORDER BY g.sprint_week DESC
+    LIMIT 1
+  `)
+
+  if (!gwRes.rows.length) {
+    // Fall back to the most recent published gameweek from any sprint
+    const fallback = await pool.query(`
+      SELECT g.*, s.name AS sprint_name, s.id AS sprint_id,
+             s.start_date, s.end_date, s.status AS sprint_status
+      FROM gameweeks g
+      JOIN sprints s ON s.id = g.sprint_id
+      WHERE g.status IN ('PUBLISHED', 'LOCKED')
+      ORDER BY g.sprint_week DESC, g.created_at DESC
+      LIMIT 1
+    `)
+    if (!fallback.rows.length) return ok(null)
+    gwRes.rows = fallback.rows
+  }
+
+  const gw = gwRes.rows[0]
+
+  // Events + options for this gameweek (result omitted so demo can't be spoiled)
+  const evRes = await pool.query(`
+    SELECT e.*,
+           f.venue_name, f.venue_city,
+           f.home_logo AS fixture_home_logo, f.away_logo AS fixture_away_logo
+    FROM events e
+    LEFT JOIN fixtures f ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
+    WHERE e.gameweek_id = $1
+    ORDER BY e.match_time ASC
+  `, [gw.id])
+
+  const optRes = await pool.query(`
+    SELECT eo.id, eo.event_id, eo.label, eo.energy_cost
+    FROM event_options eo
+    JOIN events e ON e.id = eo.event_id
+    WHERE e.gameweek_id = $1
+  `, [gw.id])
+
+  const optsByEvent = {}
+  for (const o of optRes.rows) {
+    if (!optsByEvent[o.event_id]) optsByEvent[o.event_id] = []
+    optsByEvent[o.event_id].push({ id: o.id, label: o.label, energy_cost: o.energy_cost })
+  }
+
+  // Days left until lock
+  const lockTime = gw.lock_time ? new Date(gw.lock_time) : null
+  const daysLeft = lockTime
+    ? Math.max(0, Math.ceil((lockTime - Date.now()) / 86400000))
+    : null
+
+  return ok({
+    sprint: {
+      id: gw.sprint_id,
+      name: gw.sprint_name,
+      status: gw.sprint_status,
+      start_date: gw.start_date,
+      end_date: gw.end_date,
+    },
+    gameweek: {
+      id: gw.id,
+      sprint_week: gw.sprint_week,
+      status: gw.status,
+      lock_time: gw.lock_time,
+      reveal_time: gw.reveal_time,
+      days_left: daysLeft,
+    },
+    events: evRes.rows.map(e => ({
+      ...e,
+      home_logo: e.fixture_home_logo || e.home_logo,
+      away_logo: e.fixture_away_logo || e.away_logo,
+      options: optsByEvent[e.id] ?? [],
+    })),
+  })
 }
