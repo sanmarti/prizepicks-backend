@@ -487,6 +487,26 @@ async function getProfile(event, user) {
     [user.id]
   )
 
+  // Per-competition stats (only competitions with ≥1 correct pick)
+  const compStatsRes = await pool.query(
+    `SELECT
+       COALESCE(c.name, f.league_name)   AS competition_name,
+       c.logo_url                         AS competition_logo,
+       f.api_league_id,
+       COUNT(CASE WHEN eo.result = 'WON' THEN 1 END)::int  AS correct,
+       COUNT(up.id)::int                                    AS total
+     FROM user_picks up
+     JOIN events e ON e.id = up.event_id
+     JOIN event_options eo ON eo.id = up.event_option_id
+     JOIN fixtures f ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
+     LEFT JOIN competitions c ON c.id = f.competition_id
+     WHERE up.user_id = $1 AND eo.result IN ('WON', 'LOST')
+     GROUP BY COALESCE(c.name, f.league_name), c.logo_url, f.api_league_id
+     HAVING COUNT(CASE WHEN eo.result = 'WON' THEN 1 END) > 0
+     ORDER BY correct DESC`,
+    [user.id]
+  )
+
   const stats = lifetimeRes.rows[0]
   const totalPicks = stats.lifetime_correct + stats.lifetime_incorrect
   const accuracy = totalPicks > 0
@@ -500,6 +520,7 @@ async function getProfile(event, user) {
     sprint_history: sprintHistory.rows,
     movement_history: movHistory.rows,
     badges: badgesRes.rows,
+    competition_stats: compStatsRes.rows,
   })
 }
 
@@ -899,12 +920,32 @@ async function getPublicProfile(event, user) {
      WHERE ub.user_id=$1 ORDER BY ub.earned_at DESC LIMIT 20`, [targetId]
   )
 
+  const compStatsRes = await pool.query(
+    `SELECT
+       COALESCE(c.name, f.league_name)   AS competition_name,
+       c.logo_url                         AS competition_logo,
+       f.api_league_id,
+       COUNT(CASE WHEN eo.result = 'WON' THEN 1 END)::int  AS correct,
+       COUNT(up.id)::int                                    AS total
+     FROM user_picks up
+     JOIN events e ON e.id = up.event_id
+     JOIN event_options eo ON eo.id = up.event_option_id
+     JOIN fixtures f ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
+     LEFT JOIN competitions c ON c.id = f.competition_id
+     WHERE up.user_id = $1 AND eo.result IN ('WON', 'LOST')
+     GROUP BY COALESCE(c.name, f.league_name), c.logo_url, f.api_league_id
+     HAVING COUNT(CASE WHEN eo.result = 'WON' THEN 1 END) > 0
+     ORDER BY correct DESC`,
+    [targetId]
+  )
+
   return ok({
     user: targetUser,
     division: divRes.rows[0] ?? null,
     lifetime_stats: statsRes.rows[0],
     sprint_history: historyRes.rows,
     badges: badgesRes.rows,
+    competition_stats: compStatsRes.rows,
   })
 }
 
