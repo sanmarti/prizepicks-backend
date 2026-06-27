@@ -3,6 +3,60 @@ const { getPool } = require("../../shared/db")
 const { verifyToken, extractFromEvent } = require("../../shared/auth")
 const { ok, error, unauthorized } = require("../../shared/response")
 
+// ── Player name fuzzy matching ────────────────────────────────────────────────
+function normalizeStr(s) {
+  return (s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')  // strip diacritics (é→e, ü→u)
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function lastName(s) {
+  const parts = normalizeStr(s).split(' ')
+  // Skip single-letter initials (e.g. "h. " → skip "h")
+  const words = parts.filter(p => p.length > 1)
+  return words[words.length - 1] || ''
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length
+  const dp = Array.from({ length: m + 1 }, (_, i) =>
+    Array.from({ length: n + 1 }, (_, j) => i === 0 ? j : j === 0 ? i : 0)
+  )
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+  return dp[m][n]
+}
+
+function playerNameMatches(adminName, apiName) {
+  const na = normalizeStr(adminName)
+  const nb = normalizeStr(apiName)
+  if (!na || !nb) return false
+
+  // 1. Exact normalized match
+  if (na === nb) return true
+
+  // 2. Contains check — handles "Haaland" matching "E. Haaland" or "Erling Haaland"
+  if (nb.includes(na) || na.includes(nb)) return true
+
+  // 3. Last-name match — handles "Mbappe" ↔ "K. Mbappe" or "Kylian Mbappe"
+  const la = lastName(na), lb = lastName(nb)
+  if (la.length >= 3 && la === lb) return true
+
+  // 4. Fuzzy last-name match (1 edit distance) — covers minor typos
+  if (la.length >= 4 && lb.length >= 4 && levenshtein(la, lb) <= 1) return true
+
+  // 5. Fuzzy full-name match (2 edit distance) — covers "Ronaldo" ↔ "Ronaldc" etc.
+  if (na.length >= 5 && nb.length >= 5 && levenshtein(na, nb) <= 2) return true
+
+  return false
+}
+
 exports.handler = async (event) => {
   const routeKey = event.routeKey
 
@@ -143,14 +197,18 @@ async function resolve(event, user) {
       cornerTotal = cs.rows[0]?.total ?? 0
     }
 
-    // For PLAYER_SCORE — fetch goal events from fixture_events
+    // For PLAYER_SCORE — fetch goal scorers from fixture_events (column is `player`, type is `type`)
     let scorers = []
     if (ev.event_type === 'PLAYER_SCORE' && ev.player_name) {
       const pe = await pool.query(
-        "SELECT player_name FROM fixture_events WHERE fixture_id = $1 AND event_type = 'Goal'",
+        `SELECT player FROM fixture_events
+         WHERE fixture_id = $1
+           AND type = 'Goal'
+           AND (detail IS NULL OR detail NOT ILIKE '%own goal%')`,
         [ev.fixture_id]
       )
-      scorers = pe.rows.map(r => (r.player_name || '').toLowerCase())
+      scorers = pe.rows.map(r => r.player || '')
+      console.log(`PLAYER_SCORE event ${ev.id} — player_name="${ev.player_name}" scorers=[${scorers.join(', ')}]`)
     }
 
     const options = await pool.query(
@@ -164,7 +222,8 @@ async function resolve(event, user) {
       if (ev.event_type === 'PLAYER_SCORE') {
         const rk = opt.result_key || ''
         const lb = (opt.label || '').toLowerCase()
-        const scored = scorers.some(s => s.includes((ev.player_name || '').toLowerCase()))
+        const scored = scorers.some(s => playerNameMatches(ev.player_name, s))
+        console.log(`  → opt="${opt.label}" rk="${rk}" scored=${scored}`)
         if (rk === 'PLAYER_SCORES' || lb.includes('scores') || lb === 'yes') {
           result = scored ? 'WON' : 'LOST'
         } else {

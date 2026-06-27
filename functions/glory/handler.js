@@ -1163,11 +1163,18 @@ async function purchaseEnergyPack(event, user) {
     [user.id, pack.energy_amount]
   )
 
-  // Log transaction with pack and price for revenue reporting
+  // Log transaction (legacy)
   await pool.query(
-    `INSERT INTO energy_transactions (user_id, amount, type, description, pack_id, price_euros)
-     VALUES ($1, $2, 'PURCHASE', $3, $4, $5)`,
-    [user.id, pack.energy_amount, `Purchased: ${pack.name}`, pack.id, pack.price_euros ?? 0]
+    `INSERT INTO energy_transactions (user_id, amount, type, description)
+     VALUES ($1, $2, 'PURCHASE', $3)`,
+    [user.id, pack.energy_amount, `Purchased: ${pack.name}`]
+  )
+
+  // Log purchase for revenue reporting
+  await pool.query(
+    `INSERT INTO energy_pack_purchases (user_id, pack_id, pack_name, energy_amount, price_euros)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [user.id, pack.id, pack.name, pack.energy_amount, pack.price_euros ?? 0]
   )
 
   const newBalance = await pool.query(

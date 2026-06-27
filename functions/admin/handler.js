@@ -330,14 +330,13 @@ async function getDashboard(event) {
       FROM user_picks
       WHERE created_at >= NOW() - INTERVAL '7 days'`),
 
-    // Revenue totals
+    // Revenue totals (from dedicated purchases table)
     pool.query(`
       SELECT
         COUNT(*)::int                        AS total_purchases,
         COALESCE(SUM(price_euros), 0)::float AS total_revenue,
         COUNT(DISTINCT user_id)::int         AS paying_users
-      FROM energy_transactions
-      WHERE type = 'PURCHASE'`),
+      FROM energy_pack_purchases`),
 
     // Revenue by day (last 30 days)
     pool.query(`
@@ -345,8 +344,8 @@ async function getDashboard(event) {
         DATE(created_at)                     AS day,
         COUNT(*)::int                        AS purchases,
         COALESCE(SUM(price_euros), 0)::float AS revenue
-      FROM energy_transactions
-      WHERE type = 'PURCHASE' AND created_at >= NOW() - INTERVAL '30 days'
+      FROM energy_pack_purchases
+      WHERE created_at >= NOW() - INTERVAL '30 days'
       GROUP BY day ORDER BY day ASC`),
 
     // Revenue by month (last 12 months)
@@ -355,19 +354,18 @@ async function getDashboard(event) {
         TO_CHAR(DATE_TRUNC('month', created_at), 'YYYY-MM') AS month,
         COUNT(*)::int                                        AS purchases,
         COALESCE(SUM(price_euros), 0)::float                AS revenue
-      FROM energy_transactions
-      WHERE type = 'PURCHASE' AND created_at >= NOW() - INTERVAL '12 months'
+      FROM energy_pack_purchases
+      WHERE created_at >= NOW() - INTERVAL '12 months'
       GROUP BY month ORDER BY month ASC`),
 
     // Top spenders (by revenue)
     pool.query(`
       SELECT u.id, u.display_name, u.email,
-             COUNT(et.id)::int                        AS purchases,
-             COALESCE(SUM(et.price_euros), 0)::float  AS total_spent,
-             COALESCE(SUM(et.amount), 0)::int         AS energy_bought
-      FROM energy_transactions et
-      JOIN users u ON u.id = et.user_id
-      WHERE et.type = 'PURCHASE'
+             COUNT(p.id)::int                        AS purchases,
+             COALESCE(SUM(p.price_euros), 0)::float  AS total_spent,
+             COALESCE(SUM(p.energy_amount), 0)::int  AS energy_bought
+      FROM energy_pack_purchases p
+      JOIN users u ON u.id = p.user_id
       GROUP BY u.id, u.display_name, u.email
       ORDER BY total_spent DESC
       LIMIT 10`),
@@ -387,13 +385,13 @@ async function getDashboard(event) {
 
     // Pack sales breakdown
     pool.query(`
-      SELECT ep.name, ep.price_euros, ep.energy_amount,
-             COUNT(et.id)::int                        AS units_sold,
-             COALESCE(SUM(et.price_euros), 0)::float  AS revenue
-      FROM energy_transactions et
-      JOIN energy_packs ep ON ep.id = et.pack_id
-      WHERE et.type = 'PURCHASE'
-      GROUP BY ep.id, ep.name, ep.price_euros, ep.energy_amount
+      SELECT pack_name AS name,
+             MIN(price_euros)::float                 AS price_euros,
+             MIN(energy_amount)::int                 AS energy_amount,
+             COUNT(*)::int                           AS units_sold,
+             COALESCE(SUM(price_euros), 0)::float    AS revenue
+      FROM energy_pack_purchases
+      GROUP BY pack_name
       ORDER BY revenue DESC`),
   ])
 

@@ -38,7 +38,7 @@ async function register(event) {
     [userId, email.toLowerCase(), passwordHash, display_name]
   )
   await pool.query(
-    "INSERT INTO energy_wallets (id, user_id, balance) VALUES ($1, $2, 5)",
+    "INSERT INTO energy_wallets (id, user_id, balance) VALUES ($1, $2, 0)",
     [uuidv4(), userId]
   )
 
