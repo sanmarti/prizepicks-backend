@@ -507,6 +507,35 @@ async function getProfile(event, user) {
     [user.id]
   )
 
+  // Division championships: sprints where user ranked #1 in their division
+  const divChampRes = await pool.query(
+    `SELECT
+       d.id AS division_id,
+       d.name AS division_name,
+       d.icon AS division_icon,
+       d.display_order,
+       COUNT(*)::int                                               AS sprints_in_division,
+       COUNT(*) FILTER (WHERE ranked.division_rank = 1)::int      AS championships
+     FROM (
+       SELECT
+         usp.user_id,
+         usp.sprint_id,
+         usp.division_id,
+         RANK() OVER (
+           PARTITION BY usp.sprint_id, usp.division_id
+           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC
+         ) AS division_rank
+       FROM user_sprint_progress usp
+       WHERE usp.settled_at IS NOT NULL
+     ) ranked
+     JOIN divisions d ON d.id = ranked.division_id
+     WHERE ranked.user_id = $1
+     GROUP BY d.id, d.name, d.icon, d.display_order
+     HAVING COUNT(*) FILTER (WHERE ranked.division_rank = 1) > 0
+     ORDER BY championships DESC, d.display_order DESC`,
+    [user.id]
+  )
+
   const stats = lifetimeRes.rows[0]
   const totalPicks = stats.lifetime_correct + stats.lifetime_incorrect
   const accuracy = totalPicks > 0
@@ -521,6 +550,7 @@ async function getProfile(event, user) {
     movement_history: movHistory.rows,
     badges: badgesRes.rows,
     competition_stats: compStatsRes.rows,
+    division_championships: divChampRes.rows,
   })
 }
 
@@ -939,6 +969,34 @@ async function getPublicProfile(event, user) {
     [targetId]
   )
 
+  const divChampRes = await pool.query(
+    `SELECT
+       d.id AS division_id,
+       d.name AS division_name,
+       d.icon AS division_icon,
+       d.display_order,
+       COUNT(*)::int                                               AS sprints_in_division,
+       COUNT(*) FILTER (WHERE ranked.division_rank = 1)::int      AS championships
+     FROM (
+       SELECT
+         usp.user_id,
+         usp.sprint_id,
+         usp.division_id,
+         RANK() OVER (
+           PARTITION BY usp.sprint_id, usp.division_id
+           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC
+         ) AS division_rank
+       FROM user_sprint_progress usp
+       WHERE usp.settled_at IS NOT NULL
+     ) ranked
+     JOIN divisions d ON d.id = ranked.division_id
+     WHERE ranked.user_id = $1
+     GROUP BY d.id, d.name, d.icon, d.display_order
+     HAVING COUNT(*) FILTER (WHERE ranked.division_rank = 1) > 0
+     ORDER BY championships DESC, d.display_order DESC`,
+    [targetId]
+  )
+
   return ok({
     user: targetUser,
     division: divRes.rows[0] ?? null,
@@ -946,6 +1004,7 @@ async function getPublicProfile(event, user) {
     sprint_history: historyRes.rows,
     badges: badgesRes.rows,
     competition_stats: compStatsRes.rows,
+    division_championships: divChampRes.rows,
   })
 }
 
