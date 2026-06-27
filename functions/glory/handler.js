@@ -470,11 +470,16 @@ async function getProfile(event, user) {
     [user.id]
   )
 
-  // Badges
+  // Badges — all active badges with earned count so UI can show locked/unlocked
   const badgesRes = await pool.query(
-    `SELECT ub.earned_at, b.code, b.name, b.icon, b.description
-     FROM user_badges ub JOIN badges b ON b.id=ub.badge_id
-     WHERE ub.user_id=$1 ORDER BY ub.earned_at DESC`,
+    `SELECT b.code, b.name, b.icon, b.description,
+            COUNT(ub.id)::int      AS earned_count,
+            MAX(ub.earned_at)      AS last_earned_at
+     FROM badges b
+     LEFT JOIN user_badges ub ON ub.badge_id = b.id AND ub.user_id = $1
+     WHERE b.is_active = TRUE
+     GROUP BY b.code, b.name, b.icon, b.description
+     ORDER BY (COUNT(ub.id) > 0) DESC, MAX(ub.earned_at) DESC NULLS LAST`,
     [user.id]
   )
 
@@ -945,9 +950,15 @@ async function getPublicProfile(event, user) {
   )
 
   const badgesRes = await pool.query(
-    `SELECT ub.earned_at, b.name, b.icon, b.description
-     FROM user_badges ub JOIN badges b ON b.id=ub.badge_id
-     WHERE ub.user_id=$1 ORDER BY ub.earned_at DESC LIMIT 20`, [targetId]
+    `SELECT b.code, b.name, b.icon, b.description,
+            COUNT(ub.id)::int      AS earned_count,
+            MAX(ub.earned_at)      AS last_earned_at
+     FROM badges b
+     LEFT JOIN user_badges ub ON ub.badge_id = b.id AND ub.user_id = $1
+     WHERE b.is_active = TRUE
+     GROUP BY b.code, b.name, b.icon, b.description
+     ORDER BY (COUNT(ub.id) > 0) DESC, MAX(ub.earned_at) DESC NULLS LAST`,
+    [targetId]
   )
 
   const compStatsRes = await pool.query(
