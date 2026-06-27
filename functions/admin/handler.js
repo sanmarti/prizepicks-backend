@@ -203,16 +203,16 @@ async function getUserDetail(event) {
       ORDER BY prh.created_at DESC
     `, [userId]),
 
-    // Per-matchweek entries
+    // Per-matchweek entries — all statuses, no filter
     pool.query(`
       SELECT
         uge.id, uge.status, uge.picks_submitted, uge.correct_picks, uge.incorrect_picks,
         uge.league_points, uge.is_perfect_week, uge.settled_at, uge.created_at,
         g.sprint_week, g.lock_time,
-        s.name AS sprint_name, s.id AS sprint_id
+        s.name AS sprint_name
       FROM user_gameweek_entries uge
       JOIN gameweeks g ON g.id = uge.gameweek_id
-      LEFT JOIN sprints s ON s.id = uge.sprint_id
+      LEFT JOIN sprints s ON s.id = COALESCE(uge.sprint_id, g.sprint_id)
       WHERE uge.user_id = $1
       ORDER BY COALESCE(g.lock_time, uge.created_at) DESC
     `, [userId]),
