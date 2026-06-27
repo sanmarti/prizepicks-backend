@@ -141,16 +141,16 @@ async function getGloryStatus(event, user) {
     sprint.gameweeks = allGwRes.rows
     sprint.gameweek_count = allGwRes.rows.reduce((max, g) => Math.max(max, g.sprint_week || 0), 0)
 
-    // Current gameweek: among PUBLISHED ones prefer the one whose lock_time is
-    // soonest in the future (i.e. the active week), then LOCKED, then last FINISHED
+    // Current gameweek: LOCKED week = the active calendar week (matches live/done).
+    // Only fall back to PUBLISHED if there is no LOCKED week (between weeks).
     const now = new Date()
     const publishedRows = allGwRes.rows.filter(g => g.status === 'PUBLISHED')
     const activePub = publishedRows.find(g => new Date(g.lock_time) > now)
       ?? publishedRows[publishedRows.length - 1]
       ?? null
-    const locked    = allGwRes.rows.find(g => g.status === 'LOCKED')
-    const finished  = [...allGwRes.rows].reverse().find(g => g.status === 'FINISHED')
-    currentGameweek = activePub ?? locked ?? finished ?? allGwRes.rows[0] ?? null
+    const locked   = allGwRes.rows.find(g => g.status === 'LOCKED')
+    const finished = [...allGwRes.rows].reverse().find(g => g.status === 'FINISHED')
+    currentGameweek = locked ?? activePub ?? finished ?? allGwRes.rows[0] ?? null
 
     // Next division
     const div = await pool.query(
@@ -1163,11 +1163,11 @@ async function purchaseEnergyPack(event, user) {
     [user.id, pack.energy_amount]
   )
 
-  // Log transaction
+  // Log transaction with pack and price for revenue reporting
   await pool.query(
-    `INSERT INTO energy_transactions (user_id, amount, type, description)
-     VALUES ($1, $2, 'PURCHASE', $3)`,
-    [user.id, pack.energy_amount, `Purchased: ${pack.name}`]
+    `INSERT INTO energy_transactions (user_id, amount, type, description, pack_id, price_euros)
+     VALUES ($1, $2, 'PURCHASE', $3, $4, $5)`,
+    [user.id, pack.energy_amount, `Purchased: ${pack.name}`, pack.id, pack.price_euros ?? 0]
   )
 
   const newBalance = await pool.query(

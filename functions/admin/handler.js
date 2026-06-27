@@ -69,6 +69,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/users/{id}")       return await getUserDetail(event)
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
+    if (routeKey === "GET /admin/dashboard")        return await getDashboard(event)
     if (routeKey === "GET /admin/odds")             return await getOddsForFixture(event)
     if (routeKey === "GET /admin/competitions")              return await listCompetitions()
     if (routeKey === "POST /admin/competitions")             return await createCompetition(event)
@@ -275,6 +276,154 @@ async function getStats() {
     users: users.rows[0].count,
     leagues: leagues.rows[0].count,
     gameweeks: gameweeks.rows[0].count,
+  })
+}
+
+async function getDashboard(event) {
+  const pool = await getPool()
+  const { range = '30d' } = event.queryStringParameters || {}
+
+  const [
+    usersTotal,
+    usersToday,
+    usersWeek,
+    usersMonth,
+    userGrowth,
+    activeThisWeek,
+    totalPicksWeek,
+    revenueTotal,
+    revenueByDay,
+    revenueByMonth,
+    topSpenders,
+    divisionDist,
+    picksTrend,
+    packSales,
+  ] = await Promise.all([
+    // Total users
+    pool.query(`SELECT COUNT(*)::int AS count FROM users`),
+
+    // New users today
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '1 day'`),
+
+    // New users this week
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '7 days'`),
+
+    // New users this month
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '30 days'`),
+
+    // User growth last 30 days (by day)
+    pool.query(`
+      SELECT DATE(created_at) AS day, COUNT(*)::int AS new_users
+      FROM users
+      WHERE created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY day ORDER BY day ASC`),
+
+    // Active users this week (submitted picks in an open/published gameweek)
+    pool.query(`
+      SELECT COUNT(DISTINCT user_id)::int AS count
+      FROM user_picks
+      WHERE created_at >= NOW() - INTERVAL '7 days'`),
+
+    // Total picks submitted this week
+    pool.query(`
+      SELECT COUNT(*)::int AS count
+      FROM user_picks
+      WHERE created_at >= NOW() - INTERVAL '7 days'`),
+
+    // Revenue totals
+    pool.query(`
+      SELECT
+        COUNT(*)::int                        AS total_purchases,
+        COALESCE(SUM(price_euros), 0)::float AS total_revenue,
+        COUNT(DISTINCT user_id)::int         AS paying_users
+      FROM energy_transactions
+      WHERE type = 'PURCHASE'`),
+
+    // Revenue by day (last 30 days)
+    pool.query(`
+      SELECT
+        DATE(created_at)                     AS day,
+        COUNT(*)::int                        AS purchases,
+        COALESCE(SUM(price_euros), 0)::float AS revenue
+      FROM energy_transactions
+      WHERE type = 'PURCHASE' AND created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY day ORDER BY day ASC`),
+
+    // Revenue by month (last 12 months)
+    pool.query(`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', created_at), 'YYYY-MM') AS month,
+        COUNT(*)::int                                        AS purchases,
+        COALESCE(SUM(price_euros), 0)::float                AS revenue
+      FROM energy_transactions
+      WHERE type = 'PURCHASE' AND created_at >= NOW() - INTERVAL '12 months'
+      GROUP BY month ORDER BY month ASC`),
+
+    // Top spenders (by revenue)
+    pool.query(`
+      SELECT u.id, u.display_name, u.email,
+             COUNT(et.id)::int                        AS purchases,
+             COALESCE(SUM(et.price_euros), 0)::float  AS total_spent,
+             COALESCE(SUM(et.amount), 0)::int         AS energy_bought
+      FROM energy_transactions et
+      JOIN users u ON u.id = et.user_id
+      WHERE et.type = 'PURCHASE'
+      GROUP BY u.id, u.display_name, u.email
+      ORDER BY total_spent DESC
+      LIMIT 10`),
+
+    // Division distribution
+    pool.query(`
+      SELECT division, COUNT(*)::int AS count
+      FROM glory_standings
+      GROUP BY division ORDER BY division ASC`),
+
+    // Picks trend last 30 days
+    pool.query(`
+      SELECT DATE(created_at) AS day, COUNT(*)::int AS picks
+      FROM user_picks
+      WHERE created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY day ORDER BY day ASC`),
+
+    // Pack sales breakdown
+    pool.query(`
+      SELECT ep.name, ep.price_euros, ep.energy_amount,
+             COUNT(et.id)::int                        AS units_sold,
+             COALESCE(SUM(et.price_euros), 0)::float  AS revenue
+      FROM energy_transactions et
+      JOIN energy_packs ep ON ep.id = et.pack_id
+      WHERE et.type = 'PURCHASE'
+      GROUP BY ep.id, ep.name, ep.price_euros, ep.energy_amount
+      ORDER BY revenue DESC`),
+  ])
+
+  const total = usersTotal.rows[0].count
+  const activeCount = activeThisWeek.rows[0].count
+
+  return ok({
+    users: {
+      total,
+      new_today:    usersToday.rows[0].count,
+      new_week:     usersWeek.rows[0].count,
+      new_month:    usersMonth.rows[0].count,
+      growth_by_day: userGrowth.rows,
+    },
+    engagement: {
+      active_this_week:     activeCount,
+      participation_rate:   total > 0 ? Math.round((activeCount / total) * 1000) / 10 : 0,
+      total_picks_week:     totalPicksWeek.rows[0].count,
+      picks_trend_by_day:   picksTrend.rows,
+    },
+    revenue: {
+      total_purchases:  revenueTotal.rows[0].total_purchases,
+      total_revenue:    revenueTotal.rows[0].total_revenue,
+      paying_users:     revenueTotal.rows[0].paying_users,
+      by_day:           revenueByDay.rows,
+      by_month:         revenueByMonth.rows,
+      pack_breakdown:   packSales.rows,
+    },
+    top_spenders:    topSpenders.rows,
+    divisions:       divisionDist.rows,
   })
 }
 

@@ -300,6 +300,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/stats
             Method: GET
+        GetDashboard:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/dashboard
+            Method: GET
         GetOdds:
           Type: HttpApi
           Properties:
