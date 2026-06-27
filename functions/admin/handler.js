@@ -284,14 +284,18 @@ async function getDashboard(event) {
   const pool = await getPool()
   const { range = '30d' } = event.queryStringParameters || {}
 
+  const intervalMap = { '7d': '7 days', '30d': '30 days', '90d': '90 days' }
+  const interval = intervalMap[range] || '30 days'
+  const days     = range === '7d' ? 7 : range === '90d' ? 90 : 30
+
   const [
     usersTotal,
     usersToday,
     usersWeek,
     usersMonth,
     userGrowth,
-    activeThisWeek,
-    totalPicksWeek,
+    activeInRange,
+    totalPicksRange,
     revenueTotal,
     revenueByDay,
     revenueByMonth,
@@ -299,6 +303,8 @@ async function getDashboard(event) {
     divisionDist,
     picksTrend,
     packSales,
+    gameStats,
+    currentSprint,
   ] = await Promise.all([
     // Total users
     pool.query(`SELECT COUNT(*)::int AS count FROM users`),
@@ -309,29 +315,29 @@ async function getDashboard(event) {
     // New users this week
     pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '7 days'`),
 
-    // New users this month
-    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '30 days'`),
+    // New users in selected range
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '${interval}'`),
 
-    // User growth last 30 days (by day)
+    // User growth (by day, range-aware)
     pool.query(`
       SELECT DATE(created_at) AS day, COUNT(*)::int AS new_users
       FROM users
-      WHERE created_at >= NOW() - INTERVAL '30 days'
+      WHERE created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
-    // Active users this week (submitted picks in an open/published gameweek)
+    // Active users in range (submitted picks)
     pool.query(`
       SELECT COUNT(DISTINCT user_id)::int AS count
       FROM user_picks
-      WHERE created_at >= NOW() - INTERVAL '7 days'`),
+      WHERE created_at >= NOW() - INTERVAL '${interval}'`),
 
-    // Total picks submitted this week
+    // Total picks in range
     pool.query(`
       SELECT COUNT(*)::int AS count
       FROM user_picks
-      WHERE created_at >= NOW() - INTERVAL '7 days'`),
+      WHERE created_at >= NOW() - INTERVAL '${interval}'`),
 
-    // Revenue totals (from dedicated purchases table)
+    // Revenue totals (all time)
     pool.query(`
       SELECT
         COUNT(*)::int                        AS total_purchases,
@@ -339,14 +345,14 @@ async function getDashboard(event) {
         COUNT(DISTINCT user_id)::int         AS paying_users
       FROM energy_pack_purchases`),
 
-    // Revenue by day (last 30 days)
+    // Revenue by day (range-aware)
     pool.query(`
       SELECT
         DATE(created_at)                     AS day,
         COUNT(*)::int                        AS purchases,
         COALESCE(SUM(price_euros), 0)::float AS revenue
       FROM energy_pack_purchases
-      WHERE created_at >= NOW() - INTERVAL '30 days'
+      WHERE created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
     // Revenue by month (last 12 months)
@@ -359,7 +365,7 @@ async function getDashboard(event) {
       WHERE created_at >= NOW() - INTERVAL '12 months'
       GROUP BY month ORDER BY month ASC`),
 
-    // Top spenders (by revenue)
+    // Top spenders (all time)
     pool.query(`
       SELECT u.id, u.display_name, u.email,
              COUNT(p.id)::int                        AS purchases,
@@ -371,17 +377,20 @@ async function getDashboard(event) {
       ORDER BY total_spent DESC
       LIMIT 10`),
 
-    // Division distribution
+    // Division distribution — real table
     pool.query(`
-      SELECT division, COUNT(*)::int AS count
-      FROM glory_standings
-      GROUP BY division ORDER BY division ASC`),
+      SELECT d.name, d.icon, d.display_order, d.color_primary,
+             COUNT(uds.user_id)::int AS count
+      FROM user_division_status uds
+      JOIN divisions d ON d.id = uds.division_id
+      GROUP BY d.name, d.icon, d.display_order, d.color_primary
+      ORDER BY d.display_order ASC`),
 
-    // Picks trend last 30 days
+    // Picks trend (range-aware)
     pool.query(`
       SELECT DATE(created_at) AS day, COUNT(*)::int AS picks
       FROM user_picks
-      WHERE created_at >= NOW() - INTERVAL '30 days'
+      WHERE created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
     // Pack sales breakdown
@@ -394,35 +403,81 @@ async function getDashboard(event) {
       FROM energy_pack_purchases
       GROUP BY pack_name
       ORDER BY revenue DESC`),
+
+    // Game stats: all-time picks, accuracy, perfect weeks
+    pool.query(`
+      SELECT
+        COUNT(up.id)::int                                              AS total_picks_ever,
+        COUNT(CASE WHEN eo.result = 'WON'  THEN 1 END)::int           AS total_correct_ever,
+        COUNT(CASE WHEN eo.result = 'LOST' THEN 1 END)::int           AS total_incorrect_ever,
+        COALESCE(SUM(usp.perfect_weeks), 0)::int                      AS total_perfect_weeks,
+        COUNT(DISTINCT up.user_id)::int                               AS total_players_ever,
+        COUNT(DISTINCT CASE WHEN eo.result IN ('WON','LOST') THEN up.user_id END)::int AS players_with_results
+      FROM user_picks up
+      JOIN event_options eo ON eo.id = up.event_option_id
+      CROSS JOIN (SELECT COALESCE(SUM(perfect_weeks),0) AS perfect_weeks FROM user_sprint_progress) usp`),
+
+    // Current active sprint summary
+    pool.query(`
+      SELECT s.id, s.name, s.status, s.start_date, s.end_date,
+             COUNT(DISTINCT usp.user_id)::int                  AS active_players,
+             COALESCE(SUM(usp.total_correct_picks), 0)::int    AS sprint_correct,
+             COALESCE(SUM(usp.total_incorrect_picks), 0)::int  AS sprint_incorrect,
+             COALESCE(MAX(usp.total_league_points), 0)::int    AS top_lp,
+             COALESCE(SUM(usp.perfect_weeks), 0)::int          AS sprint_perfect_weeks,
+             (SELECT COUNT(*)::int FROM gameweeks g WHERE g.sprint_id = s.id AND g.status = 'PUBLISHED') AS gw_open,
+             (SELECT COUNT(*)::int FROM gameweeks g WHERE g.sprint_id = s.id AND g.status = 'LOCKED')    AS gw_locked,
+             (SELECT COUNT(*)::int FROM gameweeks g WHERE g.sprint_id = s.id AND g.status = 'FINISHED')  AS gw_finished,
+             (SELECT COUNT(*)::int FROM gameweeks g WHERE g.sprint_id = s.id)                            AS gw_total
+      FROM sprints s
+      LEFT JOIN user_sprint_progress usp ON usp.sprint_id = s.id
+      WHERE s.status IN ('live', 'scheduled')
+      GROUP BY s.id, s.name, s.status, s.start_date, s.end_date
+      ORDER BY s.start_date ASC
+      LIMIT 1`),
   ])
 
-  const total = usersTotal.rows[0].count
-  const activeCount = activeThisWeek.rows[0].count
+  const total       = usersTotal.rows[0].count
+  const activeCount = activeInRange.rows[0].count
+  const gs          = gameStats.rows[0] ?? {}
+  const settled     = (gs.total_correct_ever ?? 0) + (gs.total_incorrect_ever ?? 0)
+  const accuracyPct = settled > 0 ? Math.round((gs.total_correct_ever / settled) * 1000) / 10 : null
 
   return ok({
+    range,
+    days,
     users: {
       total,
-      new_today:    usersToday.rows[0].count,
-      new_week:     usersWeek.rows[0].count,
-      new_month:    usersMonth.rows[0].count,
+      new_today:     usersToday.rows[0].count,
+      new_week:      usersWeek.rows[0].count,
+      new_month:     usersMonth.rows[0].count,
       growth_by_day: userGrowth.rows,
     },
     engagement: {
-      active_this_week:     activeCount,
-      participation_rate:   total > 0 ? Math.round((activeCount / total) * 1000) / 10 : 0,
-      total_picks_week:     totalPicksWeek.rows[0].count,
-      picks_trend_by_day:   picksTrend.rows,
+      active_in_range:    activeCount,
+      participation_rate: total > 0 ? Math.round((activeCount / total) * 1000) / 10 : 0,
+      total_picks_range:  totalPicksRange.rows[0].count,
+      picks_trend_by_day: picksTrend.rows,
     },
     revenue: {
-      total_purchases:  revenueTotal.rows[0].total_purchases,
-      total_revenue:    revenueTotal.rows[0].total_revenue,
-      paying_users:     revenueTotal.rows[0].paying_users,
-      by_day:           revenueByDay.rows,
-      by_month:         revenueByMonth.rows,
-      pack_breakdown:   packSales.rows,
+      total_purchases: revenueTotal.rows[0].total_purchases,
+      total_revenue:   revenueTotal.rows[0].total_revenue,
+      paying_users:    revenueTotal.rows[0].paying_users,
+      by_day:          revenueByDay.rows,
+      by_month:        revenueByMonth.rows,
+      pack_breakdown:  packSales.rows,
     },
-    top_spenders:    topSpenders.rows,
-    divisions:       divisionDist.rows,
+    game: {
+      total_picks_ever:    gs.total_picks_ever    ?? 0,
+      total_correct_ever:  gs.total_correct_ever  ?? 0,
+      total_incorrect_ever:gs.total_incorrect_ever ?? 0,
+      total_perfect_weeks: gs.total_perfect_weeks  ?? 0,
+      total_players_ever:  gs.total_players_ever   ?? 0,
+      accuracy_pct:        accuracyPct,
+    },
+    current_sprint: currentSprint.rows[0] ?? null,
+    top_spenders:   topSpenders.rows,
+    divisions:      divisionDist.rows,
   })
 }
 
@@ -1632,6 +1687,13 @@ async function addSprintGameweek(event) {
     } else {
       await pool.query(`UPDATE gameweeks SET status='DRAFT' WHERE id=$1`, [gwId])
     }
+    // Clear user picks first (no CASCADE on user_picks.event_id → events)
+    await pool.query("DELETE FROM user_picks WHERE gameweek_id=$1", [gwId])
+    // Reset entries so users re-submit when re-published
+    await pool.query(
+      `UPDATE user_gameweek_entries SET status='open', picks_submitted=0 WHERE gameweek_id=$1`,
+      [gwId]
+    )
     // Remove old events (CASCADE deletes event_options)
     await pool.query("DELETE FROM events WHERE gameweek_id=$1", [gwId])
   } else {
@@ -1845,7 +1907,27 @@ async function settleSprint(event, adminUser) {
     }
   }
 
-  // ── Step 5: Finalize sprint ───────────────────────────────────────────────
+  // ── Step 5: Division champion badges ─────────────────────────────────────
+  const DIV_CHAMP_CODE = { 1: 'DIV_CHAMP_ACADEMY', 2: 'DIV_CHAMP_SUNDAY', 3: 'DIV_CHAMP_DIV3', 4: 'DIV_CHAMP_DIV2', 5: 'DIV_CHAMP_DIV1', 6: 'DIV_CHAMP_CHAMPIONS' }
+  const divRankRes = await pool.query(
+    `SELECT user_id, division_id
+     FROM (
+       SELECT usp.user_id, usp.division_id,
+         RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS div_rank
+       FROM user_sprint_progress usp
+       WHERE usp.sprint_id = $1
+     ) ranked
+     WHERE div_rank = 1`,
+    [id]
+  )
+  for (const row of divRankRes.rows) {
+    const div = divById[row.division_id]
+    if (!div) continue
+    const code = DIV_CHAMP_CODE[div.display_order]
+    if (code) await awardBadgeAdmin(pool, row.user_id, code, id, null)
+  }
+
+  // ── Step 6: Finalize sprint ───────────────────────────────────────────────
   const ruleSnapshot = JSON.stringify(divisions)
   await pool.query(
     "UPDATE sprints SET status='completed', settled_at=NOW(), rule_snapshot=$1 WHERE id=$2",
