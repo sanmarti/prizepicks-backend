@@ -447,11 +447,12 @@ async function getProfile(event, user) {
   // Lifetime stats
   const lifetimeRes = await pool.query(
     `SELECT
-       COALESCE(SUM(total_correct_picks),0)::int   AS lifetime_correct,
-       COALESCE(SUM(total_incorrect_picks),0)::int  AS lifetime_incorrect,
-       COALESCE(SUM(total_league_points),0)::int    AS lifetime_lp,
-       COALESCE(SUM(perfect_weeks),0)::int          AS total_perfect_weeks,
-       COUNT(*)::int                                AS sprints_played
+       COALESCE(SUM(total_correct_picks),0)::int      AS lifetime_correct,
+       COALESCE(SUM(total_incorrect_picks),0)::int    AS lifetime_incorrect,
+       COALESCE(SUM(total_league_points),0)::int      AS lifetime_lp,
+       COALESCE(SUM(perfect_weeks),0)::int            AS total_perfect_weeks,
+       COALESCE(SUM(gameweeks_participated),0)::int   AS matchweeks_played,
+       COUNT(*)::int                                  AS sprints_played
      FROM user_sprint_progress WHERE user_id=$1`,
     [user.id]
   )
@@ -535,10 +536,19 @@ async function getLeaderboard(event, user) {
        usp.total_incorrect_picks, usp.perfect_weeks,
        usp.gameweeks_participated, usp.is_rookie,
        d.name AS division_name, d.icon AS division_icon,
-       RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS rank
+       RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS rank,
+       COALESCE(lt.lifetime_correct, 0)::int   AS lifetime_correct,
+       COALESCE(lt.lifetime_incorrect, 0)::int AS lifetime_incorrect
      FROM user_sprint_progress usp
      JOIN users u ON u.id=usp.user_id
      JOIN divisions d ON d.id=usp.division_id
+     LEFT JOIN (
+       SELECT user_id,
+              SUM(total_correct_picks)::int   AS lifetime_correct,
+              SUM(total_incorrect_picks)::int AS lifetime_incorrect
+       FROM user_sprint_progress
+       GROUP BY user_id
+     ) lt ON lt.user_id = usp.user_id
      ${whereClause}
      ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC
      LIMIT 100`,
@@ -865,10 +875,11 @@ async function getPublicProfile(event, user) {
   )
 
   const statsRes = await pool.query(
-    `SELECT COALESCE(SUM(total_correct_picks),0)::int AS lifetime_correct,
-            COALESCE(SUM(total_league_points),0)::int AS lifetime_lp,
-            COALESCE(SUM(perfect_weeks),0)::int AS total_perfect_weeks,
-            COUNT(*)::int AS sprints_played
+    `SELECT COALESCE(SUM(total_correct_picks),0)::int    AS lifetime_correct,
+            COALESCE(SUM(total_league_points),0)::int    AS lifetime_lp,
+            COALESCE(SUM(perfect_weeks),0)::int          AS total_perfect_weeks,
+            COALESCE(SUM(gameweeks_participated),0)::int AS matchweeks_played,
+            COUNT(*)::int                                AS sprints_played
      FROM user_sprint_progress WHERE user_id=$1`, [targetId]
   )
 
