@@ -754,7 +754,60 @@ async function resolveGameweek(event) {
   }
 
   await pool.query("UPDATE gameweeks SET status='FINISHED' WHERE id=$1", [gameweek_id])
-  return ok({ resolved: true, gameweek_id, skipped_events: skipped })
+
+  // Immediately settle entries and push LP + perfect week bonus to sprint totals.
+  // settleSprint still runs later for division movement, but players see their score now.
+  const entriesForGw = await pool.query(
+    `SELECT uge.* FROM user_gameweek_entries uge
+     WHERE uge.gameweek_id = $1 AND uge.status NOT IN ('completed', 'void')`,
+    [gameweek_id]
+  )
+
+  let immediatelySettled = 0
+  for (const entry of entriesForGw.rows) {
+    const picksRes = await pool.query(
+      `SELECT up.id, eo.result FROM user_picks up
+       JOIN event_options eo ON eo.id = up.event_option_id
+       WHERE up.entry_id = $1`,
+      [entry.id]
+    )
+    const hasPending = picksRes.rows.some(p => p.result === 'PENDING')
+    if (hasPending) continue
+
+    const correct   = picksRes.rows.filter(p => p.result === 'WON').length
+    const incorrect = picksRes.rows.filter(p => p.result === 'LOST').length
+    const isPerfect = correct === 6
+    const bonus     = isPerfect ? 4 : 0
+    const lp        = correct + bonus
+
+    await pool.query(
+      `UPDATE user_gameweek_entries SET
+         status='completed', correct_picks=$1, incorrect_picks=$2,
+         league_points=$3, perfect_week_bonus=$4, is_perfect_week=$5, settled_at=NOW()
+       WHERE id=$6`,
+      [correct, incorrect, lp, bonus, isPerfect, entry.id]
+    )
+
+    if (entry.sprint_id) {
+      await pool.query(
+        `UPDATE user_sprint_progress SET
+           total_correct_picks    = total_correct_picks + $1,
+           total_incorrect_picks  = total_incorrect_picks + $2,
+           total_league_points    = total_league_points + $3,
+           perfect_weeks          = perfect_weeks + $4,
+           gameweeks_participated = gameweeks_participated + 1
+         WHERE user_id = $5 AND sprint_id = $6`,
+        [correct, incorrect, lp, isPerfect ? 1 : 0, entry.user_id, entry.sprint_id]
+      )
+    }
+
+    if (isPerfect) {
+      await awardBadgeAdmin(pool, entry.user_id, 'PERFECT_WEEK', entry.sprint_id, gameweek_id)
+    }
+    immediatelySettled++
+  }
+
+  return ok({ resolved: true, gameweek_id, skipped_events: skipped, immediately_settled: immediatelySettled })
 }
 
 function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers, playerName) {
