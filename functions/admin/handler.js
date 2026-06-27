@@ -171,13 +171,14 @@ async function getUserDetail(event) {
       ORDER BY s.start_date DESC
     `, [userId]),
 
-    // Total gameweek entries (matchweeks played)
+    // Lifetime stats from sprint progress (same source as listUsers)
     pool.query(`
-      SELECT COUNT(*)::int AS total_matchweeks,
-             SUM(correct_picks)::int AS total_correct,
-             SUM(incorrect_picks)::int AS total_incorrect
-      FROM user_gameweek_entries
-      WHERE user_id = $1 AND status = 'completed'
+      SELECT
+        COALESCE(SUM(gameweeks_participated), 0)::int        AS total_matchweeks,
+        COALESCE(SUM(total_correct_picks), 0)::int           AS total_correct,
+        COALESCE(SUM(total_incorrect_picks), 0)::int         AS total_incorrect
+      FROM user_sprint_progress
+      WHERE user_id = $1
     `, [userId]),
 
     // Current division
