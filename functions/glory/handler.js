@@ -479,7 +479,7 @@ async function getProfile(event, user) {
      LEFT JOIN user_badges ub ON ub.badge_id = b.id AND ub.user_id = $1
      WHERE b.is_active = TRUE
      GROUP BY b.code, b.name, b.icon, b.description
-     ORDER BY (COUNT(ub.id) > 0) DESC, MAX(ub.earned_at) DESC NULLS LAST`,
+     ORDER BY CASE WHEN COUNT(ub.id) > 0 THEN 0 ELSE 1 END, MAX(ub.earned_at) DESC NULLS LAST`,
     [user.id]
   )
 
@@ -957,7 +957,7 @@ async function getPublicProfile(event, user) {
      LEFT JOIN user_badges ub ON ub.badge_id = b.id AND ub.user_id = $1
      WHERE b.is_active = TRUE
      GROUP BY b.code, b.name, b.icon, b.description
-     ORDER BY (COUNT(ub.id) > 0) DESC, MAX(ub.earned_at) DESC NULLS LAST`,
+     ORDER BY CASE WHEN COUNT(ub.id) > 0 THEN 0 ELSE 1 END, MAX(ub.earned_at) DESC NULLS LAST`,
     [targetId]
   )
 
