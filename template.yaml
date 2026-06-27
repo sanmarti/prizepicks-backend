@@ -546,7 +546,7 @@ Resources:
       Handler: functions/lifecycle/handler.handler
       Timeout: 120
       Events:
-        LifecycleCron:
+        LifecycleCronV2:
           Type: Schedule
           Properties:
             Schedule: rate(5 minutes)
