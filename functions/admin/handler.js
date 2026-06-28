@@ -79,7 +79,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/competitions/{id}/gameweeks")  return await getCompetitionGameweeks(event)
     if (routeKey === "GET /admin/competitions/{id}/standings")  return await getCompetitionStandings(event)
     if (routeKey === "GET /admin/fixtures/{fixtureId}/details") return await getFixtureDetails(event)
-    // ── 6 to Glory ─────────────────────────────────────────────────────────
+    // ── OddsRivals ─────────────────────────────────────────────────────────
     if (routeKey === "GET /admin/divisions")                           return await listDivisions()
     if (routeKey === "POST /admin/divisions")                          return await createDivision(event)
     if (routeKey === "PUT /admin/divisions/{id}")                      return await updateDivision(event)
@@ -764,7 +764,7 @@ async function resolveGameweek(event) {
   let skipped = 0
   for (const ev of events) {
     const fixture = ev.fixture_id
-      ? (await pool.query("SELECT home_goals, away_goals, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
+      ? (await pool.query("SELECT home_goals, away_goals, home_winner, away_winner, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
       : null
     if (!fixture) { skipped++; continue }
     if (!DONE.includes(fixture.status_short)) { skipped++; continue }
@@ -870,6 +870,10 @@ function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers
   const h = fixture.home_goals ?? 0, a = fixture.away_goals ?? 0
   rk = rk || ''
 
+  if (eventType === 'WHO_QUALIFIES') {
+    if (rk === 'HOME_QUALIFIES') return fixture.home_winner === true ? 'WON' : 'LOST'
+    if (rk === 'AWAY_QUALIFIES') return fixture.away_winner === true ? 'WON' : 'LOST'
+  }
   if (eventType === 'MATCH_RESULT') {
     if (rk === 'HOME_WIN'  || lb === 'home win')  return h > a ? 'WON' : 'LOST'
     if (rk === 'AWAY_WIN'  || lb === 'away win')  return a > h ? 'WON' : 'LOST'
@@ -1395,7 +1399,7 @@ async function getCompetitionGameweeks(event) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 6 to Glory – Divisions
+// OddsRivals – Divisions
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function listDivisions() {
@@ -1491,7 +1495,7 @@ async function getDivisionUsers(event) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 6 to Glory – Sprints
+// OddsRivals – Sprints
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function listSprints() {

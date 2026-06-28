@@ -42,7 +42,7 @@ async function register(event) {
     [uuidv4(), userId]
   )
 
-  // Auto-assign Academy division (6 to Glory)
+  // Auto-assign Academy division (OddsRivals)
   try {
     const academy = await pool.query("SELECT id FROM divisions WHERE is_initial=TRUE LIMIT 1")
     if (academy.rows.length) {
