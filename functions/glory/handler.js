@@ -165,6 +165,28 @@ async function getGloryStatus(event, user) {
     }
   }
 
+  // Division rank for current sprint
+  let division_rank = null
+  let division_total = null
+  if (sprint && sprintProgress?.division_id) {
+    const rankRes = await pool.query(
+      `SELECT ranked.division_rank, ranked.division_total
+       FROM (
+         SELECT usp.user_id,
+           RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS division_rank,
+           COUNT(*) OVER()::int AS division_total
+         FROM user_sprint_progress usp
+         WHERE usp.sprint_id = $1 AND usp.division_id = $2
+       ) ranked
+       WHERE ranked.user_id = $3`,
+      [sprint.id, sprintProgress.division_id, user.id]
+    )
+    if (rankRes.rows.length) {
+      division_rank = rankRes.rows[0].division_rank
+      division_total = rankRes.rows[0].division_total
+    }
+  }
+
   // Recent badges
   const badgesRes = await pool.query(
     `SELECT ub.earned_at, b.code, b.name, b.icon, b.description
@@ -181,6 +203,8 @@ async function getGloryStatus(event, user) {
     sprint_progress: sprintProgress,
     current_gameweek: currentGameweek,
     recent_badges: badgesRes.rows,
+    division_rank,
+    division_total,
   })
 }
 
@@ -541,6 +565,34 @@ async function getProfile(event, user) {
     [user.id]
   )
 
+  // Longest consecutive correct picks streak, ordered by fixture date
+  const streakRes = await pool.query(
+    `WITH ordered_picks AS (
+       SELECT
+         CASE WHEN eo.result = 'WON' THEN 1 ELSE 0 END AS is_correct,
+         ROW_NUMBER() OVER (ORDER BY f.date ASC, f.id ASC, up.id ASC) AS rn
+       FROM user_picks up
+       JOIN event_options eo ON eo.id = up.event_option_id
+       JOIN events e ON e.id = up.event_id AND e.fixture_id IS NOT NULL
+       JOIN fixtures f ON f.id = e.fixture_id::BIGINT
+       WHERE up.user_id = $1 AND eo.result IN ('WON', 'LOST')
+     ),
+     streak_groups AS (
+       SELECT
+         is_correct,
+         rn - ROW_NUMBER() OVER (PARTITION BY is_correct ORDER BY rn) AS grp
+       FROM ordered_picks
+     ),
+     streaks AS (
+       SELECT COUNT(*)::int AS streak_len
+       FROM streak_groups
+       WHERE is_correct = 1
+       GROUP BY grp
+     )
+     SELECT COALESCE(MAX(streak_len), 0)::int AS longest_streak FROM streaks`,
+    [user.id]
+  )
+
   const stats = lifetimeRes.rows[0]
   const totalPicks = stats.lifetime_correct + stats.lifetime_incorrect
   const accuracy = totalPicks > 0
@@ -556,6 +608,7 @@ async function getProfile(event, user) {
     badges: badgesRes.rows,
     competition_stats: compStatsRes.rows,
     division_championships: divChampRes.rows,
+    longest_correct_streak: streakRes.rows[0]?.longest_streak ?? 0,
   })
 }
 
@@ -1008,6 +1061,131 @@ async function getPublicProfile(event, user) {
     [targetId]
   )
 
+  // Longest consecutive correct picks streak, ordered by fixture date
+  const streakRes = await pool.query(
+    `WITH ordered_picks AS (
+       SELECT
+         CASE WHEN eo.result = 'WON' THEN 1 ELSE 0 END AS is_correct,
+         ROW_NUMBER() OVER (ORDER BY f.date ASC, f.id ASC, up.id ASC) AS rn
+       FROM user_picks up
+       JOIN event_options eo ON eo.id = up.event_option_id
+       JOIN events e ON e.id = up.event_id AND e.fixture_id IS NOT NULL
+       JOIN fixtures f ON f.id = e.fixture_id::BIGINT
+       WHERE up.user_id = $1 AND eo.result IN ('WON', 'LOST')
+     ),
+     streak_groups AS (
+       SELECT
+         is_correct,
+         rn - ROW_NUMBER() OVER (PARTITION BY is_correct ORDER BY rn) AS grp
+       FROM ordered_picks
+     ),
+     streaks AS (
+       SELECT COUNT(*)::int AS streak_len
+       FROM streak_groups
+       WHERE is_correct = 1
+       GROUP BY grp
+     )
+     SELECT COALESCE(MAX(streak_len), 0)::int AS longest_streak FROM streaks`,
+    [targetId]
+  )
+
+  // Current sprint locked/finished picks (visible to others only after lock)
+  const activeSprintRes = await pool.query(
+    `SELECT s.* FROM sprints s
+     WHERE s.status IN ('live','scheduled')
+        OR (s.status = 'draft' AND EXISTS (
+              SELECT 1 FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED')
+           ))
+     ORDER BY
+       CASE WHEN EXISTS (
+         SELECT 1 FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED')
+       ) THEN 0 ELSE 1 END,
+       CASE WHEN s.status='live' THEN 0 WHEN s.status='scheduled' THEN 1 ELSE 2 END,
+       s.start_date ASC
+     LIMIT 1`
+  )
+  const activeSprint = activeSprintRes.rows[0] ?? null
+
+  let current_sprint = null
+  if (activeSprint) {
+    const [progRes, gwRes] = await Promise.all([
+      pool.query(
+        "SELECT * FROM user_sprint_progress WHERE user_id=$1 AND sprint_id=$2",
+        [targetId, activeSprint.id]
+      ),
+      pool.query(
+        `SELECT g.id, g.sprint_week, g.status, g.lock_time,
+                uge.id AS entry_id, uge.correct_picks, uge.incorrect_picks,
+                uge.league_points, uge.is_perfect_week, uge.picks_submitted
+         FROM gameweeks g
+         LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id=g.id AND uge.user_id=$2
+         WHERE g.sprint_id=$1 AND g.status IN ('LOCKED','FINISHED')
+         ORDER BY g.sprint_week ASC`,
+        [activeSprint.id, targetId]
+      ),
+    ])
+
+    const sprintProgress = progRes.rows[0] ?? null
+
+    // Division rank for this sprint
+    let division_rank = null, division_total = null
+    if (sprintProgress?.division_id) {
+      const rankRes = await pool.query(
+        `SELECT ranked.division_rank, ranked.division_total
+         FROM (
+           SELECT usp.user_id,
+             RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS division_rank,
+             COUNT(*) OVER()::int AS division_total
+           FROM user_sprint_progress usp
+           WHERE usp.sprint_id=$1 AND usp.division_id=$2
+         ) ranked WHERE ranked.user_id=$3`,
+        [activeSprint.id, sprintProgress.division_id, targetId]
+      )
+      if (rankRes.rows.length) {
+        division_rank = rankRes.rows[0].division_rank
+        division_total = rankRes.rows[0].division_total
+      }
+    }
+
+    const gameweeks = []
+    for (const gw of gwRes.rows) {
+      let picks = []
+      if (gw.entry_id) {
+        const pRes = await pool.query(
+          `SELECT e.event_type, e.fixture_name, e.match_time, e.competition,
+                  eo.label AS option_label, eo.result AS option_result, eo.energy_cost
+           FROM user_picks up
+           JOIN events e ON e.id=up.event_id
+           JOIN event_options eo ON eo.id=up.event_option_id
+           WHERE up.entry_id=$1 ORDER BY e.match_time ASC, e.id ASC`,
+          [gw.entry_id]
+        )
+        picks = pRes.rows
+      }
+      gameweeks.push({
+        sprint_week: gw.sprint_week,
+        status: gw.status,
+        lock_time: gw.lock_time,
+        entry: gw.entry_id ? {
+          correct_picks: gw.correct_picks,
+          incorrect_picks: gw.incorrect_picks,
+          league_points: gw.league_points,
+          is_perfect_week: gw.is_perfect_week,
+          picks_submitted: gw.picks_submitted,
+        } : null,
+        picks,
+      })
+    }
+
+    current_sprint = {
+      sprint: activeSprint,
+      progress: sprintProgress,
+      division_rank,
+      division_total,
+      gameweeks,
+    }
+  }
+
   return ok({
     user: targetUser,
     division: divRes.rows[0] ?? null,
@@ -1016,6 +1194,8 @@ async function getPublicProfile(event, user) {
     badges: badgesRes.rows,
     competition_stats: compStatsRes.rows,
     division_championships: divChampRes.rows,
+    longest_correct_streak: streakRes.rows[0]?.longest_streak ?? 0,
+    current_sprint,
   })
 }
 
