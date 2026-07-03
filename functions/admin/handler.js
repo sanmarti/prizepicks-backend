@@ -92,6 +92,7 @@ exports.handler = async (event) => {
     if (routeKey === "DELETE /admin/sprints/{id}/gameweeks/{gwId}")    return await removeSprintGameweek(event)
     if (routeKey === "POST /admin/sprints/{id}/settle")                return await settleSprint(event, user)
     if (routeKey === "POST /admin/sprints/{id}/activate")              return await activateSprint(event)
+    if (routeKey === "POST /admin/sprints/{id}/recalculate")           return await recalculateSprintEntries(event)
     if (routeKey === "GET /admin/rankings")                            return await getRankings(event)
     if (routeKey === "GET /admin/fixtures/available")                  return await getAvailableFixtures(event)
     if (routeKey === "POST /admin/fixtures/import-range")              return await importFixturesByRange(event)
@@ -115,6 +116,7 @@ async function listUsers() {
   const { rows } = await pool.query(`
     SELECT
       u.id, u.email, u.display_name, u.role, u.created_at,
+      u.last_login_at, u.login_count, u.last_seen_at, u.app_opens,
       COALESCE(ew.balance, 0)                                                           AS energy_balance,
       COALESCE((SELECT SUM(et.amount) FROM energy_transactions et
                 WHERE et.user_id = u.id AND et.type = 'PURCHASE'), 0)::int             AS extra_energy,
@@ -734,7 +736,7 @@ async function unlockGameweek(event) {
     "SELECT match_time FROM events WHERE gameweek_id = $1 AND match_time IS NOT NULL ORDER BY match_time ASC", [id]
   )
   const newLockTime = evs.length > 0
-    ? new Date(new Date(evs[0].match_time).getTime() - 60 * 60 * 1000).toISOString()
+    ? new Date(new Date(evs[0].match_time).getTime() - 15 * 60 * 1000).toISOString()
     : null
 
   await pool.query(
@@ -764,7 +766,7 @@ async function resolveGameweek(event) {
   let skipped = 0
   for (const ev of events) {
     const fixture = ev.fixture_id
-      ? (await pool.query("SELECT home_goals, away_goals, home_winner, away_winner, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
+      ? (await pool.query("SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
       : null
     if (!fixture) { skipped++; continue }
     if (!DONE.includes(fixture.status_short)) { skipped++; continue }
@@ -805,7 +807,7 @@ async function resolveGameweek(event) {
   )
   for (const pick of picks) {
     await pool.query("UPDATE user_picks SET pick_status=$1 WHERE id=$2",
-      [pick.option_result === 'WON' ? 'WON' : 'LOST', pick.pick_id])
+      [pick.option_result === 'WON' ? 'won' : 'lost', pick.pick_id])
   }
 
   await pool.query("UPDATE gameweeks SET status='FINISHED' WHERE id=$1", [gameweek_id])
@@ -871,8 +873,16 @@ function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers
   rk = rk || ''
 
   if (eventType === 'WHO_QUALIFIES') {
-    if (rk === 'HOME_QUALIFIES') return fixture.home_winner === true ? 'WON' : 'LOST'
-    if (rk === 'AWAY_QUALIFIES') return fixture.away_winner === true ? 'WON' : 'LOST'
+    const ph = fixture.pen_home ?? null
+    const pa = fixture.pen_away ?? null
+    const homeWins = fixture.home_winner === true
+      || (fixture.home_winner == null && h > a)
+      || (fixture.home_winner == null && h === a && ph != null && ph > pa)
+    const awayWins = fixture.away_winner === true
+      || (fixture.away_winner == null && a > h)
+      || (fixture.away_winner == null && h === a && pa != null && pa > ph)
+    if (rk === 'HOME_QUALIFIES') return homeWins ? 'WON' : 'LOST'
+    if (rk === 'AWAY_QUALIFIES') return awayWins ? 'WON' : 'LOST'
   }
   if (eventType === 'MATCH_RESULT') {
     if (rk === 'HOME_WIN'  || lb === 'home win')  return h > a ? 'WON' : 'LOST'
@@ -1649,7 +1659,7 @@ async function activateSprint(event) {
 async function addSprintGameweek(event) {
   const { id: sprintId } = event.pathParameters
   const b = JSON.parse(event.body || "{}")
-  const { sprint_week, events: eventDefs } = b
+  const { sprint_week, events: eventDefs, base_energy } = b
 
   if (!sprint_week || !Array.isArray(eventDefs))
     return error(400, "sprint_week and events are required")
@@ -1658,12 +1668,12 @@ async function addSprintGameweek(event) {
   if (eventDefs.length > 15)
     return error(400, "Maximum 15 events allowed")
 
-  // Auto-calculate lock_time: 1 hour before earliest match_time
+  // Auto-calculate lock_time: 15 minutes before earliest match_time
   const matchTimes = eventDefs
     .map(e => e.match_time ? new Date(e.match_time).getTime() : null)
     .filter(t => t !== null && !isNaN(t))
   const lock_time = matchTimes.length > 0
-    ? new Date(Math.min(...matchTimes) - 60 * 60 * 1000).toISOString()
+    ? new Date(Math.min(...matchTimes) - 15 * 60 * 1000).toISOString()
     : null
 
   const pool = await getPool()
@@ -1683,13 +1693,14 @@ async function addSprintGameweek(event) {
       return error(409, `Sprint week ${sprint_week} already has a ${existing.rows[0].status} gameweek`)
     gwId = existing.rows[0].id
     // Update lock_time and reset to DRAFT; preserve the row to keep FK references intact
+    const baseEnergyVal = (typeof base_energy === 'number' && base_energy >= 10 && base_energy <= 60) ? base_energy : 30
     if (lock_time) {
       await pool.query(
-        `UPDATE gameweeks SET lock_time=$1, reveal_time=$1, status='DRAFT' WHERE id=$2`,
-        [lock_time, gwId]
+        `UPDATE gameweeks SET lock_time=$1, reveal_time=$1, status='DRAFT', base_energy=$3 WHERE id=$2`,
+        [lock_time, gwId, baseEnergyVal]
       )
     } else {
-      await pool.query(`UPDATE gameweeks SET status='DRAFT' WHERE id=$1`, [gwId])
+      await pool.query(`UPDATE gameweeks SET status='DRAFT', base_energy=$2 WHERE id=$1`, [gwId, baseEnergyVal])
     }
     // Clear user picks first (no CASCADE on user_picks.event_id → events)
     await pool.query("DELETE FROM user_picks WHERE gameweek_id=$1", [gwId])
@@ -1702,10 +1713,11 @@ async function addSprintGameweek(event) {
     await pool.query("DELETE FROM events WHERE gameweek_id=$1", [gwId])
   } else {
     gwId = uuidv4()
+    const baseEnergyVal = (typeof base_energy === 'number' && base_energy >= 10 && base_energy <= 60) ? base_energy : 30
     await pool.query(
-      `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status)
-       VALUES ($1,$2,$3,$3,$4,$4,'DRAFT')`,
-      [gwId, sprintId, sprint_week, lock_time]
+      `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status, base_energy)
+       VALUES ($1,$2,$3,$3,$4,$4,'DRAFT',$5)`,
+      [gwId, sprintId, sprint_week, lock_time, baseEnergyVal]
     )
   }
 
@@ -1929,6 +1941,21 @@ async function settleSprint(event, adminUser) {
     if (!div) continue
     const code = DIV_CHAMP_CODE[div.display_order]
     if (code) await awardBadgeAdmin(pool, row.user_id, code, id, null)
+  }
+
+  // ── Step 5.5: Sprint Winner badge (global #1 across all divisions) ────────
+  const globalWinnerRes = await pool.query(
+    `SELECT user_id FROM (
+       SELECT usp.user_id,
+         RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS overall_rank
+       FROM user_sprint_progress usp
+       WHERE usp.sprint_id = $1
+     ) ranked
+     WHERE overall_rank = 1`,
+    [id]
+  )
+  for (const row of globalWinnerRes.rows) {
+    await awardBadgeAdmin(pool, row.user_id, 'SPRINT_WINNER', id, null)
   }
 
   // ── Step 6: Finalize sprint ───────────────────────────────────────────────
@@ -2380,7 +2407,7 @@ async function getPublicScores(event) {
   const { rows } = await pool.query(
     `SELECT f.id, f.home_team, f.away_team, f.date,
             f.status_short, f.status_long, f.status_elapsed,
-            f.home_goals, f.away_goals, f.round,
+            f.home_goals, f.away_goals, f.pen_home, f.pen_away, f.round,
             f.home_logo, f.away_logo,
             f.venue_name, f.venue_city,
             c.name AS competition_name,
@@ -2404,10 +2431,16 @@ async function getPublicScores(event) {
 // ── Energy Pack CRUD ──────────────────────────────────────────────────────────
 async function listEnergyPacks() {
   const pool = await getPool()
-  const { rows } = await pool.query(
-    `SELECT * FROM energy_packs ORDER BY display_order ASC, price_euros ASC`
-  )
-  return ok(rows)
+  const [packsRes, statsRes] = await Promise.all([
+    pool.query(`SELECT * FROM energy_packs ORDER BY display_order ASC, price_euros ASC`),
+    pool.query(`
+      SELECT
+        COALESCE(SUM(price_euros), 0)::float AS total_revenue,
+        COUNT(DISTINCT user_id)::int         AS paying_users
+      FROM energy_pack_purchases
+    `),
+  ])
+  return ok({ packs: packsRes.rows, stats: statsRes.rows[0] })
 }
 
 function validatePackImage(image_url) {
@@ -2544,4 +2577,62 @@ async function getPublicGameweek() {
       options: optsByEvent[e.id] ?? [],
     })),
   })
+}
+
+// ── POST /admin/sprints/{id}/recalculate ──────────────────────────────────────
+// Recomputes league_points on all completed entries for a sprint and refreshes
+// user_sprint_progress totals. Useful to fix sprints resolved by the lifecycle
+// before entry totals were computed.
+async function recalculateSprintEntries(event) {
+  const { id: sprintId } = event.pathParameters
+  const pool = await getPool()
+
+  const sprintRes = await pool.query("SELECT id FROM sprints WHERE id=$1", [sprintId])
+  if (!sprintRes.rows.length) return error(404, "Sprint not found")
+
+  // Recompute league_points for every completed entry in this sprint
+  const { rowCount: entriesFixed } = await pool.query(
+    `UPDATE user_gameweek_entries uge SET
+       correct_picks      = agg.correct,
+       incorrect_picks    = agg.incorrect,
+       is_perfect_week    = (agg.correct = 6 AND agg.correct + agg.incorrect = 6),
+       perfect_week_bonus = CASE WHEN agg.correct = 6 AND agg.correct + agg.incorrect = 6 THEN 4 ELSE 0 END,
+       league_points      = agg.correct + CASE WHEN agg.correct = 6 AND agg.correct + agg.incorrect = 6 THEN 4 ELSE 0 END
+     FROM (
+       SELECT up.entry_id,
+         COUNT(*) FILTER (WHERE up.pick_status = 'won')::int  AS correct,
+         COUNT(*) FILTER (WHERE up.pick_status = 'lost')::int AS incorrect
+       FROM user_picks up
+       JOIN user_gameweek_entries uge2 ON uge2.id = up.entry_id
+       WHERE uge2.sprint_id = $1 AND uge2.status = 'completed'
+       GROUP BY up.entry_id
+     ) agg
+     WHERE uge.id = agg.entry_id AND uge.sprint_id = $1`,
+    [sprintId]
+  )
+
+  // Recompute user_sprint_progress totals from settled entries
+  const { rowCount: progressFixed } = await pool.query(
+    `UPDATE user_sprint_progress usp SET
+       total_correct_picks    = agg.total_correct,
+       total_incorrect_picks  = agg.total_incorrect,
+       total_league_points    = agg.total_lp,
+       perfect_weeks          = agg.perfect_weeks,
+       gameweeks_participated = agg.gw_count
+     FROM (
+       SELECT uge.user_id,
+         COALESCE(SUM(uge.correct_picks), 0)::int                AS total_correct,
+         COALESCE(SUM(uge.incorrect_picks), 0)::int              AS total_incorrect,
+         COALESCE(SUM(uge.league_points), 0)::int                AS total_lp,
+         COUNT(*) FILTER (WHERE uge.is_perfect_week = true)::int AS perfect_weeks,
+         COUNT(*)::int                                            AS gw_count
+       FROM user_gameweek_entries uge
+       WHERE uge.sprint_id = $1 AND uge.status = 'completed'
+       GROUP BY uge.user_id
+     ) agg
+     WHERE usp.user_id = agg.user_id AND usp.sprint_id = $1`,
+    [sprintId]
+  )
+
+  return ok({ sprint_id: sprintId, entries_fixed: entriesFixed, progress_rows_fixed: progressFixed })
 }
