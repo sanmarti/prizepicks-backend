@@ -812,7 +812,7 @@ async function resolveGameweek(event) {
   const DONE = ['FT', 'AET', 'PEN', 'AWD', 'WO']
 
   const { rows: events } = await pool.query(
-    "SELECT id, event_type, fixture_id, player_name, is_knockout FROM events WHERE gameweek_id = $1",
+    "SELECT id, event_type, fixture_id, player_name, FALSE AS is_knockout FROM events WHERE gameweek_id = $1",
     [gameweek_id]
   )
 
@@ -2874,7 +2874,7 @@ async function resettleEvent(event) {
 
   // 1. Fetch the event with its fixture and sprint context
   const evRes = await pool.query(
-    `SELECT e.id, e.event_type, e.fixture_id, e.gameweek_id, e.is_knockout,
+    `SELECT e.id, e.event_type, e.fixture_id, e.gameweek_id, FALSE AS is_knockout,
             g.sprint_id,
             f.id AS fid, f.competition_id,
             f.home_goals, f.away_goals, f.home_winner, f.away_winner,
