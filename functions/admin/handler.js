@@ -108,6 +108,7 @@ exports.handler = async (event) => {
     if (routeKey === "DELETE /admin/energy-packs/{id}")  return await deleteEnergyPack(event)
     if (routeKey === "GET /admin/debug/divisions")       return await debugDivisions(event)
     if (routeKey === "POST /admin/debug/fix-divisions")           return await fixDivisions(event)
+    if (routeKey === "PATCH /admin/events/{id}")                   return await updateEvent(event)
     if (routeKey === "POST /admin/events/{id}/resettle")          return await resettleEvent(event)
     if (routeKey === "POST /admin/debug/fix-who-qualifies")       return await fixBrokenWhoQualifies(event)
     return error(404, "Not found")
@@ -811,14 +812,14 @@ async function resolveGameweek(event) {
   const DONE = ['FT', 'AET', 'PEN', 'AWD', 'WO']
 
   const { rows: events } = await pool.query(
-    "SELECT id, event_type, fixture_id, player_name FROM events WHERE gameweek_id = $1",
+    "SELECT id, event_type, fixture_id, player_name, is_knockout FROM events WHERE gameweek_id = $1",
     [gameweek_id]
   )
 
   let skipped = 0
   for (const ev of events) {
     const fixture = ev.fixture_id
-      ? (await pool.query("SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
+      ? (await pool.query("SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, et_home, et_away, status_short FROM fixtures WHERE id=$1", [ev.fixture_id])).rows[0]
       : null
     if (!fixture) { skipped++; continue }
     if (!DONE.includes(fixture.status_short)) { skipped++; continue }
@@ -845,24 +846,27 @@ async function resolveGameweek(event) {
       "SELECT id, label, result_key FROM event_options WHERE event_id = $1", [ev.id]
     )
     for (const opt of options) {
-      // Re-use evaluateOption from scoring/handler.js logic (inlined here to avoid cross-require)
-      const result = adminEvaluateOption(opt.result_key, opt.label, ev.event_type, fixture, cornerTotal, scorers, ev.player_name)
+      const result = adminEvaluateOption(opt.result_key, opt.label, ev.event_type, fixture, cornerTotal, scorers, ev.player_name, ev.is_knockout ?? false)
       await pool.query("UPDATE event_options SET result=$1 WHERE id=$2", [result, opt.id])
     }
   }
 
-  // Score picks
+  // Score only picks whose options are already resolved (not PENDING)
   const { rows: picks } = await pool.query(
     `SELECT up.id AS pick_id, eo.result AS option_result FROM user_picks up
      JOIN event_options eo ON eo.id=up.event_option_id
-     JOIN events e ON e.id=up.event_id WHERE e.gameweek_id=$1`, [gameweek_id]
+     JOIN events e ON e.id=up.event_id
+     WHERE e.gameweek_id=$1 AND eo.result != 'PENDING'`, [gameweek_id]
   )
   for (const pick of picks) {
     await pool.query("UPDATE user_picks SET pick_status=$1 WHERE id=$2",
       [pick.option_result === 'WON' ? 'won' : 'lost', pick.pick_id])
   }
 
-  await pool.query("UPDATE gameweeks SET status='FINISHED' WHERE id=$1", [gameweek_id])
+  // Only mark FINISHED when all events are settled (no skipped events)
+  if (skipped === 0) {
+    await pool.query("UPDATE gameweeks SET status='FINISHED' WHERE id=$1", [gameweek_id])
+  }
 
   // Immediately settle entries and push LP + perfect week bonus to sprint totals.
   // settleSprint still runs later for division movement, but players see their score now.
@@ -919,27 +923,34 @@ async function resolveGameweek(event) {
   return ok({ resolved: true, gameweek_id, skipped_events: skipped, immediately_settled: immediatelySettled })
 }
 
-function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers, playerName) {
+function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers, playerName, isKnockout = false) {
   const lb = (label || '').toLowerCase()
-  const h = fixture.home_goals ?? 0, a = fixture.away_goals ?? 0
   rk = rk || ''
+
+  const hTotal = fixture.home_goals ?? 0
+  const aTotal = fixture.away_goals ?? 0
+  const hFt = hTotal - (fixture.et_home ?? 0)
+  const aFt = aTotal - (fixture.et_away ?? 0)
+  const h = isKnockout ? hTotal : hFt
+  const a = isKnockout ? aTotal : aFt
 
   if (eventType === 'WHO_QUALIFIES') {
     const ph = fixture.pen_home ?? null
     const pa = fixture.pen_away ?? null
     const homeWins = fixture.home_winner === true
-      || (fixture.home_winner == null && h > a)
-      || (fixture.home_winner == null && h === a && ph != null && ph > pa)
+      || (fixture.home_winner == null && hTotal > aTotal)
+      || (fixture.home_winner == null && hTotal === aTotal && ph != null && ph > pa)
     const awayWins = fixture.away_winner === true
-      || (fixture.away_winner == null && a > h)
-      || (fixture.away_winner == null && h === a && pa != null && pa > ph)
+      || (fixture.away_winner == null && aTotal > hTotal)
+      || (fixture.away_winner == null && hTotal === aTotal && pa != null && pa > ph)
     if (rk === 'HOME_QUALIFIES') return homeWins ? 'WON' : 'LOST'
     if (rk === 'AWAY_QUALIFIES') return awayWins ? 'WON' : 'LOST'
   }
+  // MATCH_RESULT is always 90-min only, regardless of knockout
   if (eventType === 'MATCH_RESULT') {
-    if (rk === 'HOME_WIN'  || lb === 'home win')  return h > a ? 'WON' : 'LOST'
-    if (rk === 'AWAY_WIN'  || lb === 'away win')  return a > h ? 'WON' : 'LOST'
-    if (rk === 'DRAW'      || lb === 'draw')       return h === a ? 'WON' : 'LOST'
+    if (rk === 'HOME_WIN'  || lb === 'home win')  return hFt > aFt ? 'WON' : 'LOST'
+    if (rk === 'AWAY_WIN'  || lb === 'away win')  return aFt > hFt ? 'WON' : 'LOST'
+    if (rk === 'DRAW'      || lb === 'draw')       return hFt === aFt ? 'WON' : 'LOST'
   }
   if (eventType === 'GOALS') {
     const total = h + a, m = rk.match(/^(OVER|UNDER)_([\d.]+)$/)
@@ -2840,17 +2851,34 @@ async function debugDivisions(event) {
 // ── POST /admin/debug/fix-divisions ──────────────────────────────────────────
 // Directly promote all users from Academy (display_order=1) to Sunday League (display_order=2)
 // in user_division_status and all non-completed sprint progress rows.
+async function updateEvent(event) {
+  const { id } = event.pathParameters
+  const body = JSON.parse(event.body || '{}')
+  const pool = await getPool()
+  const { rows } = await pool.query('SELECT id FROM events WHERE id=$1', [id])
+  if (!rows.length) return error(404, 'Event not found')
+  const updates = []
+  const params = []
+  if (typeof body.is_knockout === 'boolean') {
+    params.push(body.is_knockout); updates.push(`is_knockout=$${params.length}`)
+  }
+  if (!updates.length) return error(400, 'No updatable fields provided')
+  params.push(id)
+  await pool.query(`UPDATE events SET ${updates.join(',')} WHERE id=$${params.length}`, params)
+  return ok({ id, updated: body })
+}
+
 async function resettleEvent(event) {
   const { id: eventId } = event.pathParameters
   const pool = await getPool()
 
   // 1. Fetch the event with its fixture and sprint context
   const evRes = await pool.query(
-    `SELECT e.id, e.event_type, e.fixture_id, e.gameweek_id,
+    `SELECT e.id, e.event_type, e.fixture_id, e.gameweek_id, e.is_knockout,
             g.sprint_id,
             f.id AS fid, f.competition_id,
             f.home_goals, f.away_goals, f.home_winner, f.away_winner,
-            f.pen_home, f.pen_away
+            f.pen_home, f.pen_away, f.et_home, f.et_away
      FROM events e
      JOIN gameweeks g ON g.id = e.gameweek_id
      LEFT JOIN fixtures f ON f.id = e.fixture_id
@@ -2876,7 +2904,7 @@ async function resettleEvent(event) {
       await upsertFixtures(pool, [row])
       // Re-fetch updated fixture from DB
       const fxRes = await pool.query(
-        `SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away
+        `SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, et_home, et_away
          FROM fixtures WHERE id = $1`, [ev.fixture_id]
       )
       if (fxRes.rows.length) fixture = { ...ev, ...fxRes.rows[0] }
@@ -2899,7 +2927,7 @@ async function resettleEvent(event) {
   let wonOptionId = null
 
   for (const opt of optRes.rows) {
-    const newResult = adminEvaluateOption(opt.result_key, opt.label, ev.event_type, fixture, null, [], null)
+    const newResult = adminEvaluateOption(opt.result_key, opt.label, ev.event_type, fixture, null, [], null, ev.is_knockout ?? false)
     await pool.query(
       `UPDATE event_options SET result = $1 WHERE id = $2`,
       [newResult, opt.id]
@@ -3031,7 +3059,7 @@ async function fixBrokenWhoQualifies(event) {
 
       // Re-read fixture from DB
       const fxRes = await pool.query(
-        `SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, status_short
+        `SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, et_home, et_away, status_short
          FROM fixtures WHERE id = $1`, [ev.fixture_id]
       )
       fixture = fxRes.rows[0]
@@ -3062,7 +3090,7 @@ async function fixBrokenWhoQualifies(event) {
         [ev.event_id]
       )
 
-      // Recalculate gameweek entries
+      // Recalculate gameweek entries — no status filter so active entries are also fixed
       await pool.query(
         `UPDATE user_gameweek_entries uge SET
            correct_picks      = agg.correct,
@@ -3075,31 +3103,28 @@ async function fixBrokenWhoQualifies(event) {
              COUNT(*) FILTER (WHERE up.pick_status = 'won')::int  AS correct,
              COUNT(*) FILTER (WHERE up.pick_status = 'lost')::int AS incorrect
            FROM user_picks up
-           JOIN user_gameweek_entries uge2 ON uge2.id = up.entry_id
-           WHERE uge2.sprint_id = $1 AND uge2.status = 'completed'
+           WHERE up.gameweek_id = $1
            GROUP BY up.entry_id
          ) agg
-         WHERE uge.id = agg.entry_id AND uge.sprint_id = $1`,
-        [ev.sprint_id]
+         WHERE uge.id = agg.entry_id`,
+        [ev.gameweek_id]
       )
 
-      // Recalculate sprint progress
+      // Recalculate sprint progress — sum ALL entries (matches autoSettleFinishedEvents behaviour)
       await pool.query(
         `UPDATE user_sprint_progress usp SET
-           total_correct_picks    = agg.total_correct,
-           total_incorrect_picks  = agg.total_incorrect,
-           total_league_points    = agg.total_lp,
-           perfect_weeks          = agg.perfect_weeks,
-           gameweeks_participated = agg.gw_count
+           total_correct_picks   = agg.total_correct,
+           total_incorrect_picks = agg.total_incorrect,
+           total_league_points   = agg.total_lp,
+           perfect_weeks         = agg.perfect_weeks
          FROM (
            SELECT uge.user_id,
              COALESCE(SUM(uge.correct_picks), 0)::int                AS total_correct,
              COALESCE(SUM(uge.incorrect_picks), 0)::int              AS total_incorrect,
              COALESCE(SUM(uge.league_points), 0)::int                AS total_lp,
-             COUNT(*) FILTER (WHERE uge.is_perfect_week = true)::int AS perfect_weeks,
-             COUNT(*)::int                                            AS gw_count
+             COUNT(*) FILTER (WHERE uge.is_perfect_week = true)::int AS perfect_weeks
            FROM user_gameweek_entries uge
-           WHERE uge.sprint_id = $1 AND uge.status = 'completed'
+           WHERE uge.sprint_id = $1
            GROUP BY uge.user_id
          ) agg
          WHERE usp.user_id = agg.user_id AND usp.sprint_id = $1`,
