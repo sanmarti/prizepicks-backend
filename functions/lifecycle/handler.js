@@ -762,9 +762,9 @@ async function syncProgressDivisions(pool) {
   const { rowCount } = await pool.query(
     `UPDATE user_sprint_progress usp
      SET division_id = uds.division_id
-     FROM user_division_status uds
-     JOIN sprints s ON usp.sprint_id = s.id
+     FROM user_division_status uds, sprints s
      WHERE usp.user_id = uds.user_id
+       AND usp.sprint_id = s.id
        AND s.status NOT IN ('completed', 'archived')
        AND usp.division_id != uds.division_id`
   )
