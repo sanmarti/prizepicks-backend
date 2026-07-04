@@ -1420,8 +1420,19 @@ async function listDivisions() {
   const { rows } = await pool.query(
     `SELECT d.*,
        (SELECT COUNT(*) FROM user_sprint_progress usp
-        JOIN sprints s ON s.id = usp.sprint_id AND s.status = 'live'
-        WHERE usp.division_id = d.id)::int AS player_count
+        WHERE usp.division_id = d.id
+        AND usp.sprint_id = (
+          SELECT id FROM sprints
+          WHERE status IN ('live','scheduled')
+             OR (status = 'draft' AND EXISTS (
+                   SELECT 1 FROM gameweeks g
+                   WHERE g.sprint_id = sprints.id AND g.status IN ('PUBLISHED','LOCKED')
+                 ))
+          ORDER BY
+            CASE WHEN status='live' THEN 0 WHEN status='scheduled' THEN 1 ELSE 2 END,
+            start_date ASC
+          LIMIT 1
+        ))::int AS player_count
      FROM divisions d
      ORDER BY d.display_order ASC`
   )
