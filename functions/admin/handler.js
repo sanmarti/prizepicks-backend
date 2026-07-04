@@ -1419,7 +1419,9 @@ async function listDivisions() {
   const pool = await getPool()
   const { rows } = await pool.query(
     `SELECT d.*,
-       (SELECT COUNT(*) FROM user_division_status uds WHERE uds.division_id=d.id)::int AS player_count
+       (SELECT COUNT(*) FROM user_sprint_progress usp
+        JOIN sprints s ON s.id = usp.sprint_id AND s.status = 'live'
+        WHERE usp.division_id = d.id)::int AS player_count
      FROM divisions d
      ORDER BY d.display_order ASC`
   )
