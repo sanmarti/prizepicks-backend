@@ -41,6 +41,8 @@ exports.handler = async (event) => {
     if (routeKey === "POST /glory/energy-packs/{id}/purchase")    return await purchaseEnergyPack(event, user)
     if (routeKey === "GET /glory/purchase-history")               return await getPurchaseHistory(event, user)
     if (routeKey === "POST /glory/sprints/{id}/mark-popup-seen") return await markSprintPopupSeen(event, user)
+    if (routeKey === "GET /glory/sprints/{id}/picks")            return await getMySprintPicks(event, user)
+    if (routeKey === "GET /glory/users/{id}/sprints/{sprintId}/picks") return await getUserSprintPicks(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -685,6 +687,17 @@ async function getLeaderboard(event, user) {
        FROM user_gameweek_entries
        WHERE sprint_id = $1
        GROUP BY user_id
+     ), live AS (
+       SELECT uge.user_id, COUNT(up.id)::int AS live_picks
+       FROM user_picks up
+       JOIN events e ON e.id = up.event_id
+       JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+       JOIN gameweeks g ON g.id = uge.gameweek_id
+       WHERE g.sprint_id = $1
+         AND g.status = 'LOCKED'
+         AND NOW() >= e.match_time
+         AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
+       GROUP BY uge.user_id
      )
      SELECT
        usp.user_id, u.display_name, u.avatar_url,
@@ -694,6 +707,7 @@ async function getLeaderboard(event, user) {
        d.name AS division_name, d.icon AS division_icon,
        COALESCE(eu.energy_used, 0) AS energy_used,
        GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
+       COALESCE(live.live_picks, 0) AS live_picks,
        RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC) AS rank,
        COALESCE(lt.lifetime_correct, 0)::int   AS lifetime_correct,
        COALESCE(lt.lifetime_incorrect, 0)::int AS lifetime_incorrect
@@ -702,6 +716,7 @@ async function getLeaderboard(event, user) {
      JOIN divisions d ON d.id=usp.division_id
      LEFT JOIN eu ON eu.user_id = usp.user_id
      LEFT JOIN ps ON ps.user_id = usp.user_id
+     LEFT JOIN live ON live.user_id = usp.user_id
      LEFT JOIN (
        SELECT user_id,
               SUM(total_correct_picks)::int   AS lifetime_correct,
@@ -759,17 +774,30 @@ async function getSprintDetail(event, user) {
        ), ps AS (
          SELECT user_id, COALESCE(SUM(picks_submitted), 0)::int AS total_submitted
          FROM user_gameweek_entries WHERE sprint_id = $1 GROUP BY user_id
+       ), live AS (
+         SELECT uge.user_id, COUNT(up.id)::int AS live_picks
+         FROM user_picks up
+         JOIN events e ON e.id = up.event_id
+         JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+         JOIN gameweeks g ON g.id = uge.gameweek_id
+         WHERE g.sprint_id = $1
+           AND g.status = 'LOCKED'
+           AND NOW() >= e.match_time
+           AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
+         GROUP BY uge.user_id
        )
        SELECT usp.user_id, u.display_name, u.avatar_url,
               usp.total_league_points, usp.total_correct_picks, usp.total_incorrect_picks,
               usp.perfect_weeks, usp.sprint_outcome,
               COALESCE(eu.energy_used, 0) AS energy_used,
               GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
+              COALESCE(live.live_picks, 0) AS live_picks,
               RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC) AS rank
        FROM user_sprint_progress usp
        JOIN users u ON u.id=usp.user_id AND u.role='user'
        LEFT JOIN eu ON eu.user_id = usp.user_id
        LEFT JOIN ps ON ps.user_id = usp.user_id
+       LEFT JOIN live ON live.user_id = usp.user_id
        WHERE usp.sprint_id=$1 AND usp.division_id=$2
        ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC`,
       [sprintId, progress.division_id]
@@ -791,6 +819,17 @@ async function getSprintDetail(event, user) {
      ), ps AS (
        SELECT user_id, COALESCE(SUM(picks_submitted), 0)::int AS total_submitted
        FROM user_gameweek_entries WHERE sprint_id = $1 GROUP BY user_id
+     ), live AS (
+       SELECT uge.user_id, COUNT(up.id)::int AS live_picks
+       FROM user_picks up
+       JOIN events e ON e.id = up.event_id
+       JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+       JOIN gameweeks g ON g.id = uge.gameweek_id
+       WHERE g.sprint_id = $1
+         AND g.status = 'LOCKED'
+         AND NOW() >= e.match_time
+         AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
+       GROUP BY uge.user_id
      )
      SELECT usp.user_id, u.display_name, u.avatar_url,
             usp.total_league_points, usp.total_correct_picks, usp.total_incorrect_picks,
@@ -798,6 +837,7 @@ async function getSprintDetail(event, user) {
             d.name AS division_name, d.icon AS division_icon,
             COALESCE(eu.energy_used, 0) AS energy_used,
             GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
+            COALESCE(live.live_picks, 0) AS live_picks,
             RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS division_rank,
             RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS overall_rank
      FROM user_sprint_progress usp
@@ -805,6 +845,7 @@ async function getSprintDetail(event, user) {
      LEFT JOIN divisions d ON d.id = usp.division_id
      LEFT JOIN eu ON eu.user_id = usp.user_id
      LEFT JOIN ps ON ps.user_id = usp.user_id
+     LEFT JOIN live ON live.user_id = usp.user_id
      WHERE usp.sprint_id = $1
      ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC`,
     [sprintId]
@@ -834,17 +875,30 @@ async function getSprintDetail(event, user) {
          ), ps AS (
            SELECT user_id, COALESCE(SUM(picks_submitted), 0)::int AS total_submitted
            FROM user_gameweek_entries WHERE sprint_id = $1 GROUP BY user_id
+         ), live AS (
+           SELECT uge.user_id, COUNT(up.id)::int AS live_picks
+           FROM user_picks up
+           JOIN events e ON e.id = up.event_id
+           JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+           JOIN gameweeks g ON g.id = uge.gameweek_id
+           WHERE g.sprint_id = $1
+             AND g.status = 'LOCKED'
+             AND NOW() >= e.match_time
+             AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
+           GROUP BY uge.user_id
          )
          SELECT usp.user_id, u.display_name, u.avatar_url,
                 usp.total_league_points, usp.total_correct_picks, usp.total_incorrect_picks,
                 usp.perfect_weeks, usp.sprint_outcome,
                 COALESCE(eu.energy_used, 0) AS energy_used,
                 GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
+                COALESCE(live.live_picks, 0) AS live_picks,
                 RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS rank
          FROM user_sprint_progress usp
          JOIN users u ON u.id = usp.user_id AND u.role = 'user'
          LEFT JOIN eu ON eu.user_id = usp.user_id
          LEFT JOIN ps ON ps.user_id = usp.user_id
+         LEFT JOIN live ON live.user_id = usp.user_id
          WHERE usp.sprint_id=$1 AND usp.division_id=$2
          ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC`,
         [sprintId, topDivId]
@@ -1026,6 +1080,129 @@ async function markSprintPopupSeen(event, user) {
   return ok({ ok: true })
 }
 
+// ── GET /glory/sprints/{id}/picks ────────────────────────────────────────────
+async function getMySprintPicks(event, user) {
+  const { id: sprintId } = event.pathParameters
+  const pool = await getPool()
+
+  const { rows } = await pool.query(
+    `SELECT
+       g.sprint_week,
+       e.fixture_name, e.event_type, e.competition,
+       eo.label AS picked_label, eo.result, eo.energy_cost,
+       f.home_logo, f.away_logo,
+       uge.correct_picks AS week_correct, uge.incorrect_picks AS week_incorrect,
+       uge.league_points AS week_lp
+     FROM user_picks up
+     JOIN event_options eo          ON eo.id = up.event_option_id
+     JOIN events e                  ON e.id  = up.event_id
+     JOIN gameweeks g               ON g.id  = up.gameweek_id
+     LEFT JOIN fixtures f           ON f.id  = e.fixture_id::BIGINT
+     LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id = up.gameweek_id AND uge.user_id = up.user_id
+     WHERE up.user_id = $1 AND g.sprint_id = $2
+     ORDER BY g.sprint_week ASC, e.match_time ASC, e.fixture_name ASC`,
+    [user.id, sprintId]
+  )
+
+  // Group by sprint week, taking weekly stats from first row of each week
+  const byWeek = {}
+  for (const row of rows) {
+    const w = row.sprint_week
+    if (!byWeek[w]) {
+      byWeek[w] = {
+        sprint_week:    w,
+        week_correct:   row.week_correct ?? 0,
+        week_incorrect: row.week_incorrect ?? 0,
+        week_lp:        row.week_lp ?? 0,
+        picks: [],
+      }
+    }
+    byWeek[w].picks.push({
+      fixture_name: row.fixture_name,
+      event_type:   row.event_type,
+      competition:  row.competition,
+      picked_label: row.picked_label,
+      result:       row.result,
+      energy_cost:  row.energy_cost,
+      home_logo:    row.home_logo,
+      away_logo:    row.away_logo,
+    })
+  }
+
+  const weeks = Object.keys(byWeek)
+    .sort((a, b) => Number(a) - Number(b))
+    .map(w => byWeek[w])
+
+  return ok({ weeks })
+}
+
+// ── GET /glory/users/{id}/sprints/{sprintId}/picks ───────────────────────────
+async function getUserSprintPicks(event, user) {
+  const { id: targetUserId, sprintId } = event.pathParameters
+  const pool = await getPool()
+
+  const { rows } = await pool.query(
+    `SELECT
+       g.sprint_week,
+       e.fixture_name, e.event_type, e.competition,
+       eo.label AS picked_label, eo.result, eo.energy_cost,
+       f.home_logo, f.away_logo,
+       uge.correct_picks AS week_correct, uge.incorrect_picks AS week_incorrect,
+       uge.league_points AS week_lp
+     FROM user_picks up
+     JOIN event_options eo          ON eo.id = up.event_option_id
+     JOIN events e                  ON e.id  = up.event_id
+     JOIN gameweeks g               ON g.id  = up.gameweek_id
+     LEFT JOIN fixtures f           ON f.id  = e.fixture_id::BIGINT
+     LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id = up.gameweek_id AND uge.user_id = up.user_id
+     WHERE up.user_id = $1 AND g.sprint_id = $2
+       AND (g.status IN ('LOCKED', 'FINISHED') OR g.lock_time < NOW())
+     ORDER BY g.sprint_week ASC, e.match_time ASC, e.fixture_name ASC`,
+    [targetUserId, sprintId]
+  )
+
+  const byWeek = {}
+  for (const row of rows) {
+    const w = row.sprint_week
+    if (!byWeek[w]) {
+      byWeek[w] = {
+        sprint_week:    w,
+        week_correct:   row.week_correct ?? 0,
+        week_incorrect: row.week_incorrect ?? 0,
+        week_lp:        row.week_lp ?? 0,
+        picks: [],
+      }
+    }
+    byWeek[w].picks.push({
+      fixture_name: row.fixture_name,
+      event_type:   row.event_type,
+      competition:  row.competition,
+      picked_label: row.picked_label,
+      result:       row.result,
+      energy_cost:  row.energy_cost,
+      home_logo:    row.home_logo,
+      away_logo:    row.away_logo,
+    })
+  }
+
+  const weeks = Object.keys(byWeek)
+    .sort((a, b) => Number(a) - Number(b))
+    .map(w => byWeek[w])
+
+  // Check if user has picks in a not-yet-locked gameweek
+  const lockedRes = await pool.query(
+    `SELECT MIN(g.lock_time) AS locked_until
+     FROM user_picks up
+     JOIN gameweeks g ON g.id = up.gameweek_id
+     WHERE up.user_id = $1 AND g.sprint_id = $2
+       AND g.status NOT IN ('LOCKED', 'FINISHED') AND g.lock_time >= NOW()`,
+    [targetUserId, sprintId]
+  )
+  const locked_until = lockedRes.rows[0]?.locked_until ?? null
+
+  return ok({ weeks, locked_until })
+}
+
 // ── GET /glory/gameweek/{id}/community ───────────────────────────────────────
 // Returns all events with pick counts per option — only available after lock time
 async function getCommunityPicks(event, user) {
@@ -1121,7 +1298,7 @@ async function getPublicProfile(event, user) {
 
   const historyRes = await pool.query(
     `SELECT usp.total_league_points, usp.sprint_outcome, usp.is_rookie,
-            s.name AS sprint_name, s.start_date,
+            s.id AS sprint_id, s.name AS sprint_name, s.start_date,
             d.name AS division_name, d.icon AS division_icon
      FROM user_sprint_progress usp
      JOIN sprints s ON s.id=usp.sprint_id
