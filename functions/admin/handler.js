@@ -67,6 +67,7 @@ exports.handler = async (event) => {
     if (routeKey === "POST /admin/gameweeks/{id}/resolve")  return await resolveGameweek(event)
     if (routeKey === "GET /admin/users")            return await listUsers()
     if (routeKey === "GET /admin/users/{id}")       return await getUserDetail(event)
+    if (routeKey === "POST /admin/users/{id}/energy") return await adjustUserEnergy(event)
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
     if (routeKey === "GET /admin/dashboard")        return await getDashboard(event)
@@ -107,6 +108,7 @@ exports.handler = async (event) => {
     if (routeKey === "DELETE /admin/energy-packs/{id}")  return await deleteEnergyPack(event)
     if (routeKey === "GET /admin/debug/divisions")       return await debugDivisions(event)
     if (routeKey === "POST /admin/debug/fix-divisions")  return await fixDivisions(event)
+    if (routeKey === "POST /admin/events/{id}/resettle") return await resettleEvent(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -252,6 +254,52 @@ async function getUserDetail(event) {
     division_history:  history,
     matchweek_history: matchweeks,
   })
+}
+
+async function adjustUserEnergy(event) {
+  const pool   = await getPool()
+  const userId = event.pathParameters?.id
+  if (!userId) return error(400, 'Missing user id')
+
+  const body   = JSON.parse(event.body || '{}')
+  const amount = parseInt(body.amount)
+  if (isNaN(amount) || amount === 0) return error(400, 'amount must be a non-zero integer')
+
+  const description = body.description || 'Admin adjustment'
+
+  await pool.query('BEGIN')
+  try {
+    // Upsert wallet
+    await pool.query(
+      `INSERT INTO energy_wallets (user_id, balance)
+       VALUES ($1, 0)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    )
+
+    // Apply delta, prevent balance going below 0
+    const { rows } = await pool.query(
+      `UPDATE energy_wallets
+       SET balance = GREATEST(0, balance + $1)
+       WHERE user_id = $2
+       RETURNING balance`,
+      [amount, userId]
+    )
+    if (!rows.length) { await pool.query('ROLLBACK'); return error(404, 'User not found') }
+
+    // Record transaction
+    await pool.query(
+      `INSERT INTO energy_transactions (user_id, amount, type, description)
+       VALUES ($1, $2, 'ADMIN_ADJUSTMENT', $3)`,
+      [userId, amount, description]
+    )
+
+    await pool.query('COMMIT')
+    return ok({ balance: rows[0].balance })
+  } catch (e) {
+    await pool.query('ROLLBACK')
+    throw e
+  }
 }
 
 async function listLeagues() {
@@ -2791,6 +2839,147 @@ async function debugDivisions(event) {
 // ── POST /admin/debug/fix-divisions ──────────────────────────────────────────
 // Directly promote all users from Academy (display_order=1) to Sunday League (display_order=2)
 // in user_division_status and all non-completed sprint progress rows.
+async function resettleEvent(event) {
+  const { id: eventId } = event.pathParameters
+  const pool = await getPool()
+
+  // 1. Fetch the event with its fixture and sprint context
+  const evRes = await pool.query(
+    `SELECT e.id, e.event_type, e.fixture_id, e.gameweek_id,
+            g.sprint_id,
+            f.id AS fid, f.competition_id,
+            f.home_goals, f.away_goals, f.home_winner, f.away_winner,
+            f.pen_home, f.pen_away
+     FROM events e
+     JOIN gameweeks g ON g.id = e.gameweek_id
+     LEFT JOIN fixtures f ON f.id = e.fixture_id
+     WHERE e.id = $1`,
+    [eventId]
+  )
+  if (!evRes.rows.length) return error(404, "Event not found")
+  const ev = evRes.rows[0]
+  if (!ev.fixture_id) return error(400, "Event has no linked fixture — cannot re-settle")
+
+  // 2. Force-refresh fixture from API-Football (regardless of status)
+  let fixture = ev
+  try {
+    const secrets = await getSecrets()
+    const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+      params: { id: ev.fixture_id },
+      headers: { "x-apisports-key": secrets.key },
+      timeout: 8000,
+    })
+    const apiFixtures = res.data?.response || []
+    if (apiFixtures.length > 0) {
+      const row = apiFixtureToRow(apiFixtures[0], ev.competition_id)
+      await upsertFixtures(pool, [row])
+      // Re-fetch updated fixture from DB
+      const fxRes = await pool.query(
+        `SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away
+         FROM fixtures WHERE id = $1`, [ev.fixture_id]
+      )
+      if (fxRes.rows.length) fixture = { ...ev, ...fxRes.rows[0] }
+      console.log(`[resettle] refreshed fixture ${ev.fixture_id}: ${JSON.stringify(fxRes.rows[0])}`)
+    }
+  } catch (e) {
+    console.error(`[resettle] fixture refresh failed, using DB data:`, e.message)
+  }
+
+  // 3. Fetch all event_options for this event
+  const optRes = await pool.query(
+    `SELECT eo.id, eo.result_key, eo.label, eo.result
+     FROM event_options eo WHERE eo.event_id = $1`,
+    [eventId]
+  )
+  if (!optRes.rows.length) return error(400, "No event options found")
+
+  // 4. Re-evaluate each option
+  let optionsUpdated = 0
+  let wonOptionId = null
+
+  for (const opt of optRes.rows) {
+    const newResult = adminEvaluateOption(opt.result_key, opt.label, ev.event_type, fixture, null, [], null)
+    await pool.query(
+      `UPDATE event_options SET result = $1 WHERE id = $2`,
+      [newResult, opt.id]
+    )
+    if (newResult === 'WON') wonOptionId = opt.id
+    optionsUpdated++
+    console.log(`[resettle] option ${opt.id} (${opt.result_key}): ${opt.result} → ${newResult}`)
+  }
+
+  // 5. Re-update user_picks for all picks on this event
+  const { rowCount: wonPicks } = await pool.query(
+    `UPDATE user_picks up SET pick_status = 'won'
+     FROM event_options eo
+     WHERE eo.id = up.event_option_id AND eo.event_id = $1 AND eo.result = 'WON'`,
+    [eventId]
+  )
+  const { rowCount: lostPicks } = await pool.query(
+    `UPDATE user_picks up SET pick_status = 'lost'
+     FROM event_options eo
+     WHERE eo.id = up.event_option_id AND eo.event_id = $1 AND eo.result = 'LOST'`,
+    [eventId]
+  )
+
+  // 6. Recalculate gameweek entries and sprint progress for the affected sprint
+  const sprintId = ev.sprint_id
+  const { rowCount: entriesFixed } = await pool.query(
+    `UPDATE user_gameweek_entries uge SET
+       correct_picks      = agg.correct,
+       incorrect_picks    = agg.incorrect,
+       is_perfect_week    = (agg.correct = 6 AND agg.correct + agg.incorrect = 6),
+       perfect_week_bonus = CASE WHEN agg.correct = 6 AND agg.correct + agg.incorrect = 6 THEN 4 ELSE 0 END,
+       league_points      = agg.correct + CASE WHEN agg.correct = 6 AND agg.correct + agg.incorrect = 6 THEN 4 ELSE 0 END
+     FROM (
+       SELECT up.entry_id,
+         COUNT(*) FILTER (WHERE up.pick_status = 'won')::int  AS correct,
+         COUNT(*) FILTER (WHERE up.pick_status = 'lost')::int AS incorrect
+       FROM user_picks up
+       JOIN user_gameweek_entries uge2 ON uge2.id = up.entry_id
+       WHERE uge2.sprint_id = $1 AND uge2.status = 'completed'
+       GROUP BY up.entry_id
+     ) agg
+     WHERE uge.id = agg.entry_id AND uge.sprint_id = $1`,
+    [sprintId]
+  )
+
+  const { rowCount: progressFixed } = await pool.query(
+    `UPDATE user_sprint_progress usp SET
+       total_correct_picks    = agg.total_correct,
+       total_incorrect_picks  = agg.total_incorrect,
+       total_league_points    = agg.total_lp,
+       perfect_weeks          = agg.perfect_weeks,
+       gameweeks_participated = agg.gw_count
+     FROM (
+       SELECT uge.user_id,
+         COALESCE(SUM(uge.correct_picks), 0)::int                AS total_correct,
+         COALESCE(SUM(uge.incorrect_picks), 0)::int              AS total_incorrect,
+         COALESCE(SUM(uge.league_points), 0)::int                AS total_lp,
+         COUNT(*) FILTER (WHERE uge.is_perfect_week = true)::int AS perfect_weeks,
+         COUNT(*)::int                                            AS gw_count
+       FROM user_gameweek_entries uge
+       WHERE uge.sprint_id = $1 AND uge.status = 'completed'
+       GROUP BY uge.user_id
+     ) agg
+     WHERE usp.user_id = agg.user_id AND usp.sprint_id = $1`,
+    [sprintId]
+  )
+
+  return ok({
+    event_id:       eventId,
+    fixture_id:     ev.fixture_id,
+    fixture_data:   { home_goals: fixture.home_goals, away_goals: fixture.away_goals, home_winner: fixture.home_winner, away_winner: fixture.away_winner, pen_home: fixture.pen_home, pen_away: fixture.pen_away },
+    options_updated: optionsUpdated,
+    won_option_id:  wonOptionId,
+    picks_won:      wonPicks,
+    picks_lost:     lostPicks,
+    entries_fixed:  entriesFixed,
+    progress_fixed: progressFixed,
+    sprint_id:      sprintId,
+  })
+}
+
 async function fixDivisions(event) {
   const pool = await getPool()
 
