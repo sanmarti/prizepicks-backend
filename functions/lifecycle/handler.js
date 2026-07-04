@@ -32,6 +32,7 @@ exports.handler = async () => {
     log.locked          = await autoLockGameweeks(pool)
     log.refreshed       = await autoRefreshFixtures(pool)
     log.settled         = await autoSettleFinishedEvents(pool)
+    log.whoQualFix      = await autoFixBrokenWhoQualifies(pool)
     log.resolved        = await autoResolveGameweeks(pool)
     log.gwClosed        = await autoCloseExpiredGameweeks(pool)
     log.sprintSettled   = await autoSettleClosedSprints(pool)
@@ -1110,4 +1111,146 @@ function norm(s) {
 function lastName(s) {
   const parts = s.split(' ').filter(p => p.length > 1)
   return parts[parts.length - 1] || ''
+}
+
+// Self-healing: detect WHO_QUALIFIES events where ALL options are LOST — impossible in real football.
+// This is the signature of the FT-draw early-settlement bug. Re-fetches fixture and resettles.
+async function autoFixBrokenWhoQualifies(pool) {
+  const { rows: broken } = await pool.query(
+    `SELECT e.id AS event_id, e.fixture_id, e.gameweek_id, g.sprint_id, f.competition_id
+     FROM events e
+     JOIN event_options eo ON eo.event_id = e.id
+     JOIN gameweeks g ON g.id = e.gameweek_id
+     LEFT JOIN fixtures f ON f.id = e.fixture_id::BIGINT
+     WHERE e.event_type = 'WHO_QUALIFIES'
+       AND e.fixture_id IS NOT NULL
+     GROUP BY e.id, e.fixture_id, e.gameweek_id, g.sprint_id, f.competition_id
+     HAVING COUNT(*) FILTER (WHERE eo.result = 'WON') = 0
+        AND COUNT(*) FILTER (WHERE eo.result = 'LOST') > 0`
+  )
+  if (broken.length === 0) return 0
+
+  let secrets = null
+  let fixed = 0
+
+  for (const ev of broken) {
+    try {
+      if (!secrets) {
+        try { secrets = await getSecrets() } catch { continue }
+      }
+
+      // Force-refresh fixture from API
+      const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+        params: { id: ev.fixture_id },
+        headers: { "x-apisports-key": secrets.key },
+        timeout: 8000,
+      })
+      const apiFixtures = res.data?.response || []
+      if (!apiFixtures.length) continue
+
+      const f = apiFixtures[0]
+      await pool.query(
+        `UPDATE fixtures SET
+           status_short = $1, status_long = $2, status_elapsed = $3,
+           home_goals = $4, away_goals = $5,
+           home_winner = $6, away_winner = $7,
+           pen_home = $8, pen_away = $9,
+           updated_at = NOW()
+         WHERE id = $10`,
+        [
+          f.fixture.status.short, f.fixture.status.long, f.fixture.status.elapsed ?? null,
+          f.goals.home ?? null, f.goals.away ?? null,
+          f.teams.home.winner ?? null, f.teams.away.winner ?? null,
+          f.score.penalty?.home ?? null, f.score.penalty?.away ?? null,
+          ev.fixture_id,
+        ]
+      )
+
+      // Re-read updated fixture
+      const fxRes = await pool.query(
+        `SELECT home_goals, away_goals, home_winner, away_winner, pen_home, pen_away, status_short
+         FROM fixtures WHERE id = $1`, [ev.fixture_id]
+      )
+      const fixture = fxRes.rows[0]
+      if (!fixture || !FINISHED_STATUSES.includes(fixture.status_short)) continue
+
+      // If still a draw at FT with no winner, skip — game may not be fully done
+      if (fixture.status_short === 'FT'
+          && fixture.home_winner == null
+          && (fixture.home_goals ?? 0) === (fixture.away_goals ?? 0)) continue
+
+      // Re-evaluate options
+      const optRes = await pool.query(
+        `SELECT id, result_key, label FROM event_options WHERE event_id = $1`, [ev.event_id]
+      )
+      for (const opt of optRes.rows) {
+        const newResult = evaluateOption(opt.result_key, opt.label, 'WHO_QUALIFIES', fixture, null, [], null)
+        await pool.query(`UPDATE event_options SET result = $1 WHERE id = $2`, [newResult, opt.id])
+      }
+
+      // Re-settle user picks
+      await pool.query(
+        `UPDATE user_picks up SET pick_status = 'won'
+         FROM event_options eo
+         WHERE eo.id = up.event_option_id AND eo.event_id = $1 AND eo.result = 'WON'`,
+        [ev.event_id]
+      )
+      await pool.query(
+        `UPDATE user_picks up SET pick_status = 'lost'
+         FROM event_options eo
+         WHERE eo.id = up.event_option_id AND eo.event_id = $1 AND eo.result = 'LOST'`,
+        [ev.event_id]
+      )
+
+      // Recalculate gameweek entries
+      await pool.query(
+        `UPDATE user_gameweek_entries uge SET
+           correct_picks      = agg.correct,
+           incorrect_picks    = agg.incorrect,
+           is_perfect_week    = (agg.correct = 6 AND agg.correct + agg.incorrect = 6),
+           perfect_week_bonus = CASE WHEN agg.correct = 6 AND agg.correct + agg.incorrect = 6 THEN 4 ELSE 0 END,
+           league_points      = agg.correct + CASE WHEN agg.correct = 6 AND agg.correct + agg.incorrect = 6 THEN 4 ELSE 0 END
+         FROM (
+           SELECT up.entry_id,
+             COUNT(*) FILTER (WHERE up.pick_status = 'won')::int  AS correct,
+             COUNT(*) FILTER (WHERE up.pick_status = 'lost')::int AS incorrect
+           FROM user_picks up
+           JOIN user_gameweek_entries uge2 ON uge2.id = up.entry_id
+           WHERE uge2.sprint_id = $1 AND uge2.status = 'completed'
+           GROUP BY up.entry_id
+         ) agg
+         WHERE uge.id = agg.entry_id AND uge.sprint_id = $1`,
+        [ev.sprint_id]
+      )
+
+      // Recalculate sprint progress
+      await pool.query(
+        `UPDATE user_sprint_progress usp SET
+           total_correct_picks    = agg.total_correct,
+           total_incorrect_picks  = agg.total_incorrect,
+           total_league_points    = agg.total_lp,
+           perfect_weeks          = agg.perfect_weeks,
+           gameweeks_participated = agg.gw_count
+         FROM (
+           SELECT uge.user_id,
+             COALESCE(SUM(uge.correct_picks), 0)::int                AS total_correct,
+             COALESCE(SUM(uge.incorrect_picks), 0)::int              AS total_incorrect,
+             COALESCE(SUM(uge.league_points), 0)::int                AS total_lp,
+             COUNT(*) FILTER (WHERE uge.is_perfect_week = true)::int AS perfect_weeks,
+             COUNT(*)::int                                            AS gw_count
+           FROM user_gameweek_entries uge
+           WHERE uge.sprint_id = $1 AND uge.status = 'completed'
+           GROUP BY uge.user_id
+         ) agg
+         WHERE usp.user_id = agg.user_id AND usp.sprint_id = $1`,
+        [ev.sprint_id]
+      )
+
+      console.log(`[autoFixBrokenWhoQualifies] fixed event ${ev.event_id} fixture ${ev.fixture_id}: ${fixture.status_short} ${fixture.home_goals}-${fixture.away_goals} hw=${fixture.home_winner} aw=${fixture.away_winner}`)
+      fixed++
+    } catch (e) {
+      console.error(`[autoFixBrokenWhoQualifies] failed for event ${ev.event_id}:`, e.message)
+    }
+  }
+  return fixed
 }
