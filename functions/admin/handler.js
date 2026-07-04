@@ -89,6 +89,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/sprints/{id}")                        return await getSprint(event)
     if (routeKey === "PUT /admin/sprints/{id}")                        return await updateSprint(event)
     if (routeKey === "POST /admin/sprints/{id}/gameweeks")             return await addSprintGameweek(event)
+    if (routeKey === "PATCH /admin/sprints/{id}/gameweeks/{gwId}")     return await updateSprintGameweekDates(event)
     if (routeKey === "DELETE /admin/sprints/{id}/gameweeks/{gwId}")    return await removeSprintGameweek(event)
     if (routeKey === "POST /admin/sprints/{id}/settle")                return await settleSprint(event, user)
     if (routeKey === "POST /admin/sprints/{id}/activate")              return await activateSprint(event)
@@ -104,6 +105,8 @@ exports.handler = async (event) => {
     if (routeKey === "POST /admin/energy-packs")         return await createEnergyPack(event)
     if (routeKey === "PUT /admin/energy-packs/{id}")     return await updateEnergyPack(event)
     if (routeKey === "DELETE /admin/energy-packs/{id}")  return await deleteEnergyPack(event)
+    if (routeKey === "GET /admin/debug/divisions")       return await debugDivisions(event)
+    if (routeKey === "POST /admin/debug/fix-divisions")  return await fixDivisions(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -1415,7 +1418,10 @@ async function getCompetitionGameweeks(event) {
 async function listDivisions() {
   const pool = await getPool()
   const { rows } = await pool.query(
-    "SELECT * FROM divisions ORDER BY display_order ASC"
+    `SELECT d.*,
+       (SELECT COUNT(*) FROM user_division_status uds WHERE uds.division_id=d.id)::int AS player_count
+     FROM divisions d
+     ORDER BY d.display_order ASC`
   )
   return ok(rows)
 }
@@ -1457,27 +1463,38 @@ async function updateDivision(event) {
 
   await pool.query(
     `UPDATE divisions SET
-       name                  = COALESCE($1, name),
-       display_order         = COALESCE($2, display_order),
-       icon                  = COALESCE($3, icon),
-       badge_url             = COALESCE($4, badge_url),
-       color_primary         = COALESCE($5, color_primary),
-       color_secondary       = COALESCE($6, color_secondary),
-       is_initial            = COALESCE($7, is_initial),
-       is_highest            = COALESCE($8, is_highest),
-       allows_relegation     = COALESCE($9, allows_relegation),
-       relegation_max_points = COALESCE($10, relegation_max_points),
-       retention_min_points  = COALESCE($11, retention_min_points),
-       retention_max_points  = COALESCE($12, retention_max_points),
-       promotion_min_points  = COALESCE($13, promotion_min_points),
-       is_active             = COALESCE($14, is_active)
+       name                  = $1,
+       display_order         = $2,
+       icon                  = $3,
+       badge_url             = $4,
+       color_primary         = $5,
+       color_secondary       = $6,
+       is_initial            = $7,
+       is_highest            = $8,
+       allows_relegation     = $9,
+       relegation_max_points = $10,
+       retention_min_points  = $11,
+       retention_max_points  = $12,
+       promotion_min_points  = $13,
+       is_active             = $14
      WHERE id=$15`,
-    [b.name||null, b.display_order??null, b.icon||null, b.badge_url||null,
-     b.color_primary||null, b.color_secondary||null,
-     b.is_initial??null, b.is_highest??null, b.allows_relegation??null,
-     b.relegation_max_points !== undefined ? b.relegation_max_points : null,
-     b.retention_min_points??null, b.retention_max_points??null,
-     b.promotion_min_points??null, b.is_active??null, id]
+    [
+      b.name,
+      b.display_order != null ? parseInt(b.display_order) : null,
+      b.icon ?? null,
+      b.badge_url || null,
+      b.color_primary ?? null,
+      b.color_secondary ?? null,
+      b.is_initial ?? null,
+      b.is_highest ?? null,
+      b.allows_relegation ?? null,
+      b.relegation_max_points != null ? parseInt(b.relegation_max_points) : null,
+      b.retention_min_points != null ? parseInt(b.retention_min_points) : 0,
+      b.retention_max_points != null ? parseInt(b.retention_max_points) : null,
+      b.is_highest ? null : (b.promotion_min_points != null ? parseInt(b.promotion_min_points) : null),
+      b.is_active ?? null,
+      id,
+    ]
   )
   const { rows } = await pool.query("SELECT * FROM divisions WHERE id=$1", [id])
   return ok(rows[0])
@@ -1604,6 +1621,18 @@ async function updateSprint(event) {
   const existing = await pool.query("SELECT id FROM sprints WHERE id=$1", [id])
   if (!existing.rows.length) return error(404, "Sprint not found")
 
+  // If setting end_date, enforce it cannot be before the last gameweek's end_date
+  if (b.end_date) {
+    const lastGw = await pool.query(
+      `SELECT MAX(end_date) AS max_end FROM gameweeks WHERE sprint_id=$1 AND end_date IS NOT NULL`,
+      [id]
+    )
+    const lastGwEnd = lastGw.rows[0]?.max_end
+    if (lastGwEnd && new Date(b.end_date) < new Date(lastGwEnd)) {
+      return error(400, `Sprint end_date cannot be before its last gameweek end_date (${new Date(lastGwEnd).toISOString()})`)
+    }
+  }
+
   await pool.query(
     `UPDATE sprints SET
        name           = COALESCE($1, name),
@@ -1676,31 +1705,55 @@ async function addSprintGameweek(event) {
     ? new Date(Math.min(...matchTimes) - 15 * 60 * 1000).toISOString()
     : null
 
+  // end_date for the gameweek = latest match_time + 2h (estimated full-time)
+  const gwEndFromFixtures = matchTimes.length > 0
+    ? new Date(Math.max(...matchTimes) + 2 * 60 * 60 * 1000)
+    : null
+
   const pool = await getPool()
-  const sprint = await pool.query("SELECT id FROM sprints WHERE id=$1", [sprintId])
+  const sprint = await pool.query("SELECT id, start_date, end_date FROM sprints WHERE id=$1", [sprintId])
   if (!sprint.rows.length) return error(404, "Sprint not found")
+
+  // Default Mon-Sun dates: sprint.start_date is always a Monday, so offset by week index
+  const sprintStart = new Date(sprint.rows[0].start_date)
+  const defStart = new Date(sprintStart.getTime() + (sprint_week - 1) * 7 * 86400000)
+  defStart.setUTCHours(0, 0, 0, 0)
+  const defEnd = new Date(defStart.getTime() + 7 * 86400000 - 1000) // Sunday 23:59:59
 
   // If a DRAFT or PUBLISHED already exists for this week, update it in place
   // (DELETE would fail if user_badges/user_cards reference the gameweek without CASCADE)
   const existing = await pool.query(
-    "SELECT id, status FROM gameweeks WHERE sprint_id=$1 AND sprint_week=$2",
+    "SELECT id, status, start_date, end_date FROM gameweeks WHERE sprint_id=$1 AND sprint_week=$2",
     [sprintId, sprint_week]
   )
+
+  // Resolve end_date: use stored date if manually set, otherwise last fixture + 2h, else Mon-Sun default
+  const resolveGwEnd = (storedEnd) => {
+    if (storedEnd) return storedEnd  // respect manual override
+    if (gwEndFromFixtures) return gwEndFromFixtures.toISOString()
+    return defEnd.toISOString()
+  }
 
   let gwId
   if (existing.rows.length) {
     if (!['DRAFT', 'PUBLISHED'].includes(existing.rows[0].status))
       return error(409, `Sprint week ${sprint_week} already has a ${existing.rows[0].status} gameweek`)
     gwId = existing.rows[0].id
-    // Update lock_time and reset to DRAFT; preserve the row to keep FK references intact
+    const keepStart = existing.rows[0].start_date || defStart.toISOString()
+    const keepEnd   = resolveGwEnd(existing.rows[0].end_date)
     const baseEnergyVal = (typeof base_energy === 'number' && base_energy >= 10 && base_energy <= 60) ? base_energy : 30
     if (lock_time) {
       await pool.query(
-        `UPDATE gameweeks SET lock_time=$1, reveal_time=$1, status='DRAFT', base_energy=$3 WHERE id=$2`,
-        [lock_time, gwId, baseEnergyVal]
+        `UPDATE gameweeks SET lock_time=$1, reveal_time=$1, status='DRAFT', base_energy=$3,
+         start_date=COALESCE(start_date,$4), end_date=$5 WHERE id=$2`,
+        [lock_time, gwId, baseEnergyVal, keepStart, keepEnd]
       )
     } else {
-      await pool.query(`UPDATE gameweeks SET status='DRAFT', base_energy=$2 WHERE id=$1`, [gwId, baseEnergyVal])
+      await pool.query(
+        `UPDATE gameweeks SET status='DRAFT', base_energy=$2,
+         start_date=COALESCE(start_date,$3), end_date=$4 WHERE id=$1`,
+        [gwId, baseEnergyVal, keepStart, keepEnd]
+      )
     }
     // Clear user picks first (no CASCADE on user_picks.event_id → events)
     await pool.query("DELETE FROM user_picks WHERE gameweek_id=$1", [gwId])
@@ -1714,10 +1767,21 @@ async function addSprintGameweek(event) {
   } else {
     gwId = uuidv4()
     const baseEnergyVal = (typeof base_energy === 'number' && base_energy >= 10 && base_energy <= 60) ? base_energy : 30
+    const gwEnd = resolveGwEnd(null)
     await pool.query(
-      `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status, base_energy)
-       VALUES ($1,$2,$3,$3,$4,$4,'DRAFT',$5)`,
-      [gwId, sprintId, sprint_week, lock_time, baseEnergyVal]
+      `INSERT INTO gameweeks (id, sprint_id, sprint_week, week_number, lock_time, reveal_time, status, base_energy, start_date, end_date)
+       VALUES ($1,$2,$3,$3,$4,$4,'DRAFT',$5,$6,$7)`,
+      [gwId, sprintId, sprint_week, lock_time, baseEnergyVal, defStart.toISOString(), gwEnd]
+    )
+  }
+
+  // Ensure sprint end_date >= this gameweek's end_date
+  const gwEndVal = resolveGwEnd(existing.rows[0]?.end_date || null)
+  const sprintEnd = sprint.rows[0].end_date ? new Date(sprint.rows[0].end_date) : null
+  if (gwEndVal && (!sprintEnd || new Date(gwEndVal) > sprintEnd)) {
+    await pool.query(
+      "UPDATE sprints SET end_date=$1 WHERE id=$2",
+      [gwEndVal, sprintId]
     )
   }
 
@@ -1750,6 +1814,33 @@ async function removeSprintGameweek(event) {
   if (!gw.rows.length) return error(404, "Gameweek not found or not editable")
   await pool.query("UPDATE gameweeks SET sprint_id=NULL, sprint_week=NULL WHERE id=$1", [gwId])
   return ok({ removed: true })
+}
+
+async function updateSprintGameweekDates(event) {
+  const { id: sprintId, gwId } = event.pathParameters
+  const { start_date, end_date } = JSON.parse(event.body || '{}')
+  if (!start_date && !end_date) return error(400, "start_date or end_date required")
+  const pool = await getPool()
+  const gw = await pool.query(
+    "SELECT id FROM gameweeks WHERE id=$1 AND sprint_id=$2", [gwId, sprintId]
+  )
+  if (!gw.rows.length) return error(404, "Gameweek not found")
+  await pool.query(
+    `UPDATE gameweeks SET
+       start_date = COALESCE($1, start_date),
+       end_date   = COALESCE($2, end_date)
+     WHERE id=$3`,
+    [start_date || null, end_date || null, gwId]
+  )
+  // Ensure sprint end_date >= this gameweek end_date
+  if (end_date) {
+    await pool.query(
+      `UPDATE sprints SET end_date=$1 WHERE id=$2 AND (end_date IS NULL OR end_date < $1)`,
+      [end_date, sprintId]
+    )
+  }
+  const { rows } = await pool.query("SELECT * FROM gameweeks WHERE id=$1", [gwId])
+  return ok(rows[0])
 }
 
 // ── Sprint Settlement ─────────────────────────────────────────────────────────
@@ -2047,7 +2138,15 @@ async function getRankings(event) {
   let sid = sprintId
   if (!sid) {
     const sp = await pool.query(
-      "SELECT id FROM sprints WHERE status='live' ORDER BY start_date ASC LIMIT 1"
+      `SELECT id FROM sprints
+       WHERE status IN ('live','scheduled')
+          OR (status = 'draft' AND EXISTS (
+                SELECT 1 FROM gameweeks g WHERE g.sprint_id = sprints.id AND g.status IN ('PUBLISHED','LOCKED')
+             ))
+       ORDER BY
+         CASE WHEN status='live' THEN 0 WHEN status='scheduled' THEN 1 ELSE 2 END,
+         start_date ASC
+       LIMIT 1`
     )
     sid = sp.rows[0]?.id
   }
@@ -2087,7 +2186,7 @@ async function getRankings(event) {
        d.name AS division_name, d.icon AS division_icon, d.color_primary,
        RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS rank
      FROM user_sprint_progress usp
-     JOIN users u ON u.id=usp.user_id
+     JOIN users u ON u.id=usp.user_id AND u.role='user'
      JOIN divisions d ON d.id=usp.division_id
      ${where}
      ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC`,
@@ -2635,4 +2734,93 @@ async function recalculateSprintEntries(event) {
   )
 
   return ok({ sprint_id: sprintId, entries_fixed: entriesFixed, progress_rows_fixed: progressFixed })
+}
+
+// ── GET /admin/debug/divisions ────────────────────────────────────────────────
+async function debugDivisions(event) {
+  const pool = await getPool()
+
+  const { rows: divs } = await pool.query(
+    "SELECT id, name, display_order, promotion_min_points, relegation_max_points, allows_relegation, is_highest FROM divisions WHERE is_active=TRUE ORDER BY display_order"
+  )
+  const { rows: uds } = await pool.query(
+    `SELECT uds.user_id, u.email, d.name AS division, d.display_order
+     FROM user_division_status uds
+     JOIN users u ON u.id = uds.user_id AND u.role = 'user'
+     JOIN divisions d ON d.id = uds.division_id
+     ORDER BY d.display_order, u.email`
+  )
+  const { rows: sprints } = await pool.query(
+    "SELECT id, name, status FROM sprints WHERE status NOT IN ('archived') ORDER BY start_date DESC LIMIT 5"
+  )
+  const { rows: pending } = await pool.query(
+    `SELECT usp.user_id, u.email, s.name AS sprint, d.name AS division, usp.sprint_outcome, usp.settled_at
+     FROM user_sprint_progress usp
+     JOIN sprints s ON s.id = usp.sprint_id
+     JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+     JOIN divisions d ON d.id = usp.division_id
+     WHERE s.status = 'completed' AND usp.sprint_outcome = 'pending'
+     ORDER BY s.start_date DESC, u.email`
+  )
+  const { rows: currentProgress } = await pool.query(
+    `SELECT usp.user_id, u.email, s.name AS sprint, s.status AS sprint_status, d.name AS division, usp.sprint_outcome
+     FROM user_sprint_progress usp
+     JOIN sprints s ON s.id = usp.sprint_id
+     JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+     JOIN divisions d ON d.id = usp.division_id
+     WHERE s.status NOT IN ('completed', 'archived')
+     ORDER BY s.start_date DESC, u.email`
+  )
+
+  return ok({ divisions: divs, user_division_status: uds, recent_sprints: sprints, pending_settlement: pending, current_sprint_progress: currentProgress })
+}
+
+// ── POST /admin/debug/fix-divisions ──────────────────────────────────────────
+// Directly promote all users from Academy (display_order=1) to Sunday League (display_order=2)
+// in user_division_status and all non-completed sprint progress rows.
+async function fixDivisions(event) {
+  const pool = await getPool()
+
+  const { rows: divs } = await pool.query("SELECT id, display_order FROM divisions WHERE is_active=TRUE ORDER BY display_order")
+  const academy    = divs.find(d => d.display_order === 1)
+  const sundayLeague = divs.find(d => d.display_order === 2)
+  if (!academy || !sundayLeague) return error(400, "Divisions not found")
+
+  // 1. Mark all pending June sprint records as promoted
+  const { rowCount: settled } = await pool.query(
+    `UPDATE user_sprint_progress usp
+     SET sprint_outcome = 'promoted', final_division_id = $2, settled_at = NOW(),
+         total_league_points = COALESCE(usp.total_league_points, 0),
+         total_correct_picks = COALESCE(usp.total_correct_picks, 0),
+         total_incorrect_picks = COALESCE(usp.total_incorrect_picks, 0)
+     FROM sprints s
+     JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+     WHERE usp.sprint_id = s.id AND s.status = 'completed'
+       AND usp.division_id = $1
+       AND (usp.sprint_outcome = 'pending' OR usp.sprint_outcome = 'retained')
+       AND usp.settled_at IS NULL`,
+    [academy.id, sundayLeague.id]
+  )
+
+  // 2. Update user_division_status to Sunday League for all users still in Academy
+  const { rowCount: statusFixed } = await pool.query(
+    `UPDATE user_division_status SET division_id = $1, updated_at = NOW()
+     WHERE division_id = $2
+       AND user_id IN (SELECT id FROM users WHERE role = 'user')`,
+    [sundayLeague.id, academy.id]
+  )
+
+  // 3. Update all non-completed sprint progress rows from Academy to Sunday League
+  const { rowCount: progressFixed } = await pool.query(
+    `UPDATE user_sprint_progress usp
+     SET division_id = $1
+     FROM sprints s
+     JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+     WHERE usp.sprint_id = s.id
+       AND s.status NOT IN ('completed', 'archived')
+       AND usp.division_id = $2`,
+    [sundayLeague.id, academy.id]
+  )
+
+  return ok({ settled, statusFixed, progressFixed })
 }
