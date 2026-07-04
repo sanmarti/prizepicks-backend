@@ -1064,6 +1064,39 @@ async function myRelevantSprints(event, user) {
   }
 
   const sprints = pastRows.map(s => ({ ...s, gameweeks: gwBySprintId[s.id] || [] }))
+
+  // Recompute accurate rank for live sprints using energy_used tiebreaker (matches leaderboard logic)
+  for (const s of sprints) {
+    if (s.status === 'live' && s.division_id) {
+      const rankRes = await pool.query(
+        `SELECT rank_in_div, overall_rank
+         FROM (
+           SELECT usp.user_id,
+                  RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS rank_in_div,
+                  RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS overall_rank
+           FROM user_sprint_progress usp
+           JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+           LEFT JOIN (
+             SELECT uge.user_id, COALESCE(SUM(eo.energy_cost), 0)::int AS energy_used
+             FROM user_picks up
+             JOIN event_options eo ON eo.id = up.event_option_id
+             JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+             JOIN gameweeks g ON g.id = uge.gameweek_id
+             WHERE g.sprint_id = $2
+             GROUP BY uge.user_id
+           ) eu ON eu.user_id = usp.user_id
+           WHERE usp.sprint_id = $2
+         ) ranked
+         WHERE user_id = $1`,
+        [user.id, s.id]
+      )
+      if (rankRes.rows.length > 0) {
+        s.my_rank        = rankRes.rows[0].rank_in_div
+        s.my_global_rank = rankRes.rows[0].overall_rank
+      }
+    }
+  }
+
   return ok({ past: sprints, upcoming: futureRows })
 }
 
@@ -1097,7 +1130,7 @@ async function getMySprintPicks(event, user) {
      JOIN event_options eo          ON eo.id = up.event_option_id
      JOIN events e                  ON e.id  = up.event_id
      JOIN gameweeks g               ON g.id  = up.gameweek_id
-     LEFT JOIN fixtures f           ON f.id  = e.fixture_id::BIGINT
+     LEFT JOIN fixtures f           ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id = up.gameweek_id AND uge.user_id = up.user_id
      WHERE up.user_id = $1 AND g.sprint_id = $2
      ORDER BY g.sprint_week ASC, e.match_time ASC, e.fixture_name ASC`,
@@ -1153,7 +1186,7 @@ async function getUserSprintPicks(event, user) {
      JOIN event_options eo          ON eo.id = up.event_option_id
      JOIN events e                  ON e.id  = up.event_id
      JOIN gameweeks g               ON g.id  = up.gameweek_id
-     LEFT JOIN fixtures f           ON f.id  = e.fixture_id::BIGINT
+     LEFT JOIN fixtures f           ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id = up.gameweek_id AND uge.user_id = up.user_id
      WHERE up.user_id = $1 AND g.sprint_id = $2
        AND (g.status IN ('LOCKED', 'FINISHED') OR g.lock_time < NOW())
@@ -1471,7 +1504,7 @@ async function getPublicProfile(event, user) {
            FROM user_picks up
            JOIN events e ON e.id=up.event_id
            JOIN event_options eo ON eo.id=up.event_option_id
-           LEFT JOIN fixtures f ON f.id = e.fixture_id::BIGINT
+           LEFT JOIN fixtures f ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
            WHERE up.entry_id=$1 ORDER BY e.match_time ASC, e.id ASC`,
           [gw.entry_id]
         )

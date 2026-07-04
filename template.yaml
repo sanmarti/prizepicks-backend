@@ -288,6 +288,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/users/{id}
             Method: GET
+        AdjustUserEnergy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/users/{id}/energy
+            Method: POST
         ListLeagues:
           Type: HttpApi
           Properties:
@@ -446,6 +452,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/sprints/{id}/gameweeks
             Method: POST
+        UpdateSprintGameweekDates:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}/gameweeks/{gwId}
+            Method: PATCH
         RemoveSprintGameweek:
           Type: HttpApi
           Properties:
@@ -482,6 +494,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/sprints/{id}/activate
             Method: POST
+        RecalculateSprintEntries:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/sprints/{id}/recalculate
+            Method: POST
         AdminRankings:
           Type: HttpApi
           Properties:
@@ -512,6 +530,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/energy-packs/{id}
             Method: DELETE
+        AdminDebugDivisions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/debug/divisions
+            Method: GET
+        AdminFixDivisions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/debug/fix-divisions
+            Method: POST
         ListCompetitionsPublic:
           Type: HttpApi
           Properties:
@@ -549,7 +579,7 @@ Resources:
         LifecycleCronV2:
           Type: Schedule
           Properties:
-            Schedule: rate(5 minutes)
+            Schedule: rate(2 minutes)
             Enabled: true
 
   # --- 6 TO GLORY (user-facing) ---
@@ -626,6 +656,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /glory/sprints/{id}
             Method: GET
+        GloryMarkPopupSeen:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/sprints/{id}/mark-popup-seen
+            Method: POST
+        GlorySprintPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/sprints/{id}/picks
+            Method: GET
         GloryCommunityPicks:
           Type: HttpApi
           Properties:
@@ -637,6 +679,12 @@ Resources:
           Properties:
             ApiId: !Ref PrizePicksApi
             Path: /glory/users/{id}
+            Method: GET
+        GloryUserSprintPicks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /glory/users/{id}/sprints/{sprintId}/picks
             Method: GET
         GloryFixtureStats:
           Type: HttpApi
