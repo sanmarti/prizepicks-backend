@@ -695,8 +695,8 @@ async function getLeaderboard(event, user) {
        JOIN gameweeks g ON g.id = uge.gameweek_id
        WHERE g.sprint_id = $1
          AND g.status = 'LOCKED'
+         AND up.pick_status = 'pending'
          AND NOW() >= e.match_time
-         AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
        GROUP BY uge.user_id
      )
      SELECT
@@ -782,8 +782,8 @@ async function getSprintDetail(event, user) {
          JOIN gameweeks g ON g.id = uge.gameweek_id
          WHERE g.sprint_id = $1
            AND g.status = 'LOCKED'
+           AND up.pick_status = 'pending'
            AND NOW() >= e.match_time
-           AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
          GROUP BY uge.user_id
        )
        SELECT usp.user_id, u.display_name, u.avatar_url,
@@ -827,8 +827,8 @@ async function getSprintDetail(event, user) {
        JOIN gameweeks g ON g.id = uge.gameweek_id
        WHERE g.sprint_id = $1
          AND g.status = 'LOCKED'
+         AND up.pick_status = 'pending'
          AND NOW() >= e.match_time
-         AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
        GROUP BY uge.user_id
      )
      SELECT usp.user_id, u.display_name, u.avatar_url,
@@ -883,8 +883,8 @@ async function getSprintDetail(event, user) {
            JOIN gameweeks g ON g.id = uge.gameweek_id
            WHERE g.sprint_id = $1
              AND g.status = 'LOCKED'
+             AND up.pick_status = 'pending'
              AND NOW() >= e.match_time
-             AND NOW() < e.match_time + INTERVAL '2 hours 30 minutes'
            GROUP BY uge.user_id
          )
          SELECT usp.user_id, u.display_name, u.avatar_url,
