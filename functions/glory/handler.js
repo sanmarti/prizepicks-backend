@@ -40,6 +40,7 @@ exports.handler = async (event) => {
     if (routeKey === "GET /glory/energy-packs")                   return await listEnergyPacks(event, user)
     if (routeKey === "POST /glory/energy-packs/{id}/purchase")    return await purchaseEnergyPack(event, user)
     if (routeKey === "GET /glory/purchase-history")               return await getPurchaseHistory(event, user)
+    if (routeKey === "POST /glory/sprints/{id}/mark-popup-seen") return await markSprintPopupSeen(event, user)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -82,7 +83,8 @@ async function ensureSprintProgress(pool, userId, sprintId, divisionId, isRookie
   await pool.query(
     `INSERT INTO user_sprint_progress (user_id, sprint_id, division_id, is_rookie, sprint_outcome)
      VALUES ($1,$2,$3,$4,'pending')
-     ON CONFLICT (user_id, sprint_id) DO NOTHING`,
+     ON CONFLICT (user_id, sprint_id) DO UPDATE SET division_id = EXCLUDED.division_id
+     WHERE user_sprint_progress.division_id != EXCLUDED.division_id`,
     [userId, sprintId, divisionId, isRookie]
   )
 }
@@ -696,7 +698,7 @@ async function getLeaderboard(event, user) {
        COALESCE(lt.lifetime_correct, 0)::int   AS lifetime_correct,
        COALESCE(lt.lifetime_incorrect, 0)::int AS lifetime_incorrect
      FROM user_sprint_progress usp
-     JOIN users u ON u.id=usp.user_id
+     JOIN users u ON u.id=usp.user_id AND u.role='user'
      JOIN divisions d ON d.id=usp.division_id
      LEFT JOIN eu ON eu.user_id = usp.user_id
      LEFT JOIN ps ON ps.user_id = usp.user_id
@@ -765,7 +767,7 @@ async function getSprintDetail(event, user) {
               GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
               RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC) AS rank
        FROM user_sprint_progress usp
-       JOIN users u ON u.id=usp.user_id
+       JOIN users u ON u.id=usp.user_id AND u.role='user'
        LEFT JOIN eu ON eu.user_id = usp.user_id
        LEFT JOIN ps ON ps.user_id = usp.user_id
        WHERE usp.sprint_id=$1 AND usp.division_id=$2
@@ -799,7 +801,7 @@ async function getSprintDetail(event, user) {
             RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS division_rank,
             RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS overall_rank
      FROM user_sprint_progress usp
-     JOIN users u ON u.id = usp.user_id
+     JOIN users u ON u.id = usp.user_id AND u.role = 'user'
      LEFT JOIN divisions d ON d.id = usp.division_id
      LEFT JOIN eu ON eu.user_id = usp.user_id
      LEFT JOIN ps ON ps.user_id = usp.user_id
@@ -840,7 +842,7 @@ async function getSprintDetail(event, user) {
                 GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
                 RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS rank
          FROM user_sprint_progress usp
-         JOIN users u ON u.id = usp.user_id
+         JOIN users u ON u.id = usp.user_id AND u.role = 'user'
          LEFT JOIN eu ON eu.user_id = usp.user_id
          LEFT JOIN ps ON ps.user_id = usp.user_id
          WHERE usp.sprint_id=$1 AND usp.division_id=$2
@@ -928,9 +930,11 @@ async function myRelevantSprints(event, user) {
     `SELECT s.*,
        usp.total_league_points, usp.total_correct_picks, usp.perfect_weeks,
        usp.gameweeks_participated, usp.is_rookie, usp.sprint_outcome,
-       usp.division_id,
+       usp.division_id, usp.final_division_id, usp.closing_popup_seen_at,
        d.name AS division_name, d.icon AS division_icon, d.color_primary,
+       d.badge_url AS division_badge_url, d.display_order AS division_display_order,
        d.promotion_min_points, d.relegation_max_points,
+       fd.name AS final_division_name, fd.icon AS final_division_icon, fd.color_primary AS final_division_color,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks,
        -- User's rank within their division for this sprint
@@ -959,6 +963,7 @@ async function myRelevantSprints(event, user) {
      FROM sprints s
      LEFT JOIN user_sprint_progress usp ON usp.sprint_id=s.id AND usp.user_id=$1
      LEFT JOIN divisions d ON d.id=usp.division_id
+     LEFT JOIN divisions fd ON fd.id=usp.final_division_id
      WHERE s.status IN ('live','scheduled','completed','archived')
         OR (s.status='draft' AND s.start_date <= $2)
      ORDER BY s.start_date DESC`,
@@ -1006,6 +1011,19 @@ async function myRelevantSprints(event, user) {
 
   const sprints = pastRows.map(s => ({ ...s, gameweeks: gwBySprintId[s.id] || [] }))
   return ok({ past: sprints, upcoming: futureRows })
+}
+
+// ── POST /glory/sprints/{id}/mark-popup-seen ─────────────────────────────────
+async function markSprintPopupSeen(event, user) {
+  const { id: sprintId } = event.pathParameters
+  const pool = await getPool()
+  await pool.query(
+    `UPDATE user_sprint_progress
+     SET closing_popup_seen_at = NOW()
+     WHERE user_id=$1 AND sprint_id=$2 AND closing_popup_seen_at IS NULL`,
+    [user.id, sprintId]
+  )
+  return ok({ ok: true })
 }
 
 // ── GET /glory/gameweek/{id}/community ───────────────────────────────────────
