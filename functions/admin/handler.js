@@ -1891,8 +1891,9 @@ async function removeSprintGameweek(event) {
 
 async function updateSprintGameweekDates(event) {
   const { id: sprintId, gwId } = event.pathParameters
-  const { start_date, end_date } = JSON.parse(event.body || '{}')
-  if (!start_date && !end_date) return error(400, "start_date or end_date required")
+  const { start_date, end_date, lock_time, reveal_time } = JSON.parse(event.body || '{}')
+  if (!start_date && !end_date && !lock_time && !reveal_time)
+    return error(400, "At least one of start_date, end_date, lock_time, reveal_time is required")
   const pool = await getPool()
   const gw = await pool.query(
     "SELECT id FROM gameweeks WHERE id=$1 AND sprint_id=$2", [gwId, sprintId]
@@ -1900,12 +1901,13 @@ async function updateSprintGameweekDates(event) {
   if (!gw.rows.length) return error(404, "Gameweek not found")
   await pool.query(
     `UPDATE gameweeks SET
-       start_date = COALESCE($1, start_date),
-       end_date   = COALESCE($2, end_date)
-     WHERE id=$3`,
-    [start_date || null, end_date || null, gwId]
+       start_date  = COALESCE($1, start_date),
+       end_date    = COALESCE($2, end_date),
+       lock_time   = COALESCE($3, lock_time),
+       reveal_time = COALESCE($4, reveal_time)
+     WHERE id=$5`,
+    [start_date || null, end_date || null, lock_time || null, reveal_time || null, gwId]
   )
-  // Ensure sprint end_date >= this gameweek end_date
   if (end_date) {
     await pool.query(
       `UPDATE sprints SET end_date=$1 WHERE id=$2 AND (end_date IS NULL OR end_date < $1)`,
