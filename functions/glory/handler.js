@@ -989,6 +989,7 @@ async function myRelevantSprints(event, user) {
        d.badge_url AS division_badge_url, d.display_order AS division_display_order,
        d.promotion_min_points, d.relegation_max_points,
        fd.name AS final_division_name, fd.icon AS final_division_icon, fd.color_primary AS final_division_color,
+       nd.name AS next_division_name, nd.icon AS next_division_icon,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks,
        -- User's rank within their division for this sprint
@@ -1029,6 +1030,7 @@ async function myRelevantSprints(event, user) {
      LEFT JOIN users u ON u.id = usp.user_id
      LEFT JOIN divisions d ON d.id=usp.division_id
      LEFT JOIN divisions fd ON fd.id=usp.final_division_id
+     LEFT JOIN divisions nd ON nd.display_order = d.display_order + 1 AND nd.is_active = TRUE
      WHERE s.status IN ('live','scheduled','completed','archived')
         OR (s.status='draft' AND s.start_date <= $2)
      ORDER BY s.start_date DESC`,
