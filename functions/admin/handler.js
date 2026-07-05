@@ -1891,22 +1891,24 @@ async function removeSprintGameweek(event) {
 
 async function updateSprintGameweekDates(event) {
   const { id: sprintId, gwId } = event.pathParameters
-  const { start_date, end_date, lock_time, reveal_time } = JSON.parse(event.body || '{}')
-  if (!start_date && !end_date && !lock_time && !reveal_time)
-    return error(400, "At least one of start_date, end_date, lock_time, reveal_time is required")
+  const { start_date, end_date, lock_time, reveal_time, base_energy } = JSON.parse(event.body || '{}')
+  if (!start_date && !end_date && !lock_time && !reveal_time && base_energy == null)
+    return error(400, "At least one field is required")
   const pool = await getPool()
   const gw = await pool.query(
     "SELECT id FROM gameweeks WHERE id=$1 AND sprint_id=$2", [gwId, sprintId]
   )
   if (!gw.rows.length) return error(404, "Gameweek not found")
+  const baseEnergyVal = (typeof base_energy === 'number' && base_energy >= 10 && base_energy <= 60) ? base_energy : null
   await pool.query(
     `UPDATE gameweeks SET
        start_date  = COALESCE($1, start_date),
        end_date    = COALESCE($2, end_date),
        lock_time   = COALESCE($3, lock_time),
-       reveal_time = COALESCE($4, reveal_time)
+       reveal_time = COALESCE($4, reveal_time),
+       base_energy = COALESCE($6, base_energy)
      WHERE id=$5`,
-    [start_date || null, end_date || null, lock_time || null, reveal_time || null, gwId]
+    [start_date || null, end_date || null, lock_time || null, reveal_time || null, gwId, baseEnergyVal]
   )
   if (end_date) {
     await pool.query(
