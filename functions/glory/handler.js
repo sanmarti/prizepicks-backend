@@ -989,21 +989,17 @@ async function myRelevantSprints(event, user) {
        d.badge_url AS division_badge_url, d.display_order AS division_display_order,
        d.promotion_min_points, d.relegation_max_points,
        fd.name AS final_division_name, fd.icon AS final_division_icon, fd.color_primary AS final_division_color,
-       nd.name AS next_division_name, nd.icon AS next_division_icon,
+       (SELECT name FROM divisions WHERE display_order = d.display_order + 1 AND is_active = TRUE LIMIT 1) AS next_division_name,
+       (SELECT icon FROM divisions WHERE display_order = d.display_order + 1 AND is_active = TRUE LIMIT 1) AS next_division_icon,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks,
        -- User's rank within their division for this sprint
        CASE WHEN usp.division_id IS NOT NULL THEN (
          SELECT COUNT(*)::int + 1
          FROM user_sprint_progress usp2
-         JOIN users u2 ON u2.id = usp2.user_id
          WHERE usp2.sprint_id = s.id AND usp2.division_id = usp.division_id
-           AND (
-             usp2.total_league_points > usp.total_league_points
-             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks > usp.total_correct_picks)
-             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks = usp.total_correct_picks AND usp2.total_incorrect_picks < usp.total_incorrect_picks)
-             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks = usp.total_correct_picks AND usp2.total_incorrect_picks = usp.total_incorrect_picks AND u2.display_name < u.display_name)
-           )
+           AND (usp2.total_league_points > usp.total_league_points
+             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks > usp.total_correct_picks))
        ) END AS my_rank,
        -- Total players in this division
        CASE WHEN usp.division_id IS NOT NULL THEN (
@@ -1014,23 +1010,16 @@ async function myRelevantSprints(event, user) {
        CASE WHEN usp.division_id IS NOT NULL THEN (
          SELECT COUNT(*)::int + 1
          FROM user_sprint_progress usp3
-         JOIN users u3 ON u3.id = usp3.user_id
          WHERE usp3.sprint_id = s.id
-           AND (
-             usp3.total_league_points > usp.total_league_points
-             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks > usp.total_correct_picks)
-             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks = usp.total_correct_picks AND usp3.total_incorrect_picks < usp.total_incorrect_picks)
-             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks = usp.total_correct_picks AND usp3.total_incorrect_picks = usp.total_incorrect_picks AND u3.display_name < u.display_name)
-           )
+           AND (usp3.total_league_points > usp.total_league_points
+             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks > usp.total_correct_picks))
        ) END AS my_global_rank,
        -- Total players across all divisions for this sprint
        (SELECT COUNT(*)::int FROM user_sprint_progress usp4 WHERE usp4.sprint_id = s.id) AS total_global_players
      FROM sprints s
      LEFT JOIN user_sprint_progress usp ON usp.sprint_id=s.id AND usp.user_id=$1
-     LEFT JOIN users u ON u.id = usp.user_id
      LEFT JOIN divisions d ON d.id=usp.division_id
      LEFT JOIN divisions fd ON fd.id=usp.final_division_id
-     LEFT JOIN divisions nd ON nd.display_order = d.display_order + 1 AND nd.is_active = TRUE
      WHERE s.status IN ('live','scheduled','completed','archived')
         OR (s.status='draft' AND s.start_date <= $2)
      ORDER BY s.start_date DESC`,
