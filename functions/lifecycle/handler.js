@@ -1066,16 +1066,23 @@ function evaluateOption(resultKey, label, eventType, fixture, cornerTotal, score
   const a = isKnockout ? aTotal : aFt
 
   if (eventType === 'WHO_QUALIFIES') {
-    const ph = fixture.pen_home ?? null
-    const pa = fixture.pen_away ?? null
-    const homeWins = fixture.home_winner === true
-      || (fixture.home_winner == null && hTotal > aTotal)
-      || (fixture.home_winner == null && hTotal === aTotal && ph != null && ph > pa)
-    const awayWins = fixture.away_winner === true
-      || (fixture.away_winner == null && aTotal > hTotal)
-      || (fixture.away_winner == null && hTotal === aTotal && pa != null && pa > ph)
-    if (rk === 'HOME_QUALIFIES') return homeWins ? 'WON' : 'LOST'
-    if (rk === 'AWAY_QUALIFIES') return awayWins ? 'WON' : 'LOST'
+    // Exactly one team always qualifies — compute a single source of truth
+    // and invert for the other pick so both-lost / both-won is impossible.
+    let homeQualifies
+    if (fixture.home_winner === true)       homeQualifies = true
+    else if (fixture.away_winner === true)  homeQualifies = false
+    else if (hTotal > aTotal)               homeQualifies = true
+    else if (aTotal > hTotal)               homeQualifies = false
+    else {
+      // Level after 90 + ET — penalties decide
+      const ph = fixture.pen_home ?? null
+      const pa = fixture.pen_away ?? null
+      if (ph != null && pa != null)         homeQualifies = ph > pa
+      else                                  homeQualifies = null // data not yet available
+    }
+    if (homeQualifies === null) return 'PENDING'
+    if (rk === 'HOME_QUALIFIES') return homeQualifies ? 'WON' : 'LOST'
+    if (rk === 'AWAY_QUALIFIES') return homeQualifies ? 'LOST' : 'WON'
   }
   // MATCH_RESULT is always about the 90-min result, regardless of knockout
   if (eventType === 'MATCH_RESULT') {
