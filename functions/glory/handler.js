@@ -188,9 +188,10 @@ async function getGloryStatus(event, user) {
       `SELECT ranked.division_rank, ranked.division_total
        FROM (
          SELECT usp.user_id,
-           RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC)::int AS division_rank,
+           RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS division_rank,
            COUNT(*) OVER()::int AS division_total
          FROM user_sprint_progress usp
+         JOIN users u ON u.id = usp.user_id
          WHERE usp.sprint_id = $1 AND usp.division_id = $2
        ) ranked
        WHERE ranked.user_id = $3`,
@@ -567,9 +568,10 @@ async function getProfile(event, user) {
          usp.division_id,
          RANK() OVER (
            PARTITION BY usp.sprint_id, usp.division_id
-           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC
+           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, u.display_name ASC
          ) AS division_rank
        FROM user_sprint_progress usp
+       JOIN users u ON u.id = usp.user_id
        WHERE usp.settled_at IS NOT NULL
      ) ranked
      JOIN divisions d ON d.id = ranked.division_id
@@ -1120,6 +1122,20 @@ async function getMySprintPicks(event, user) {
   const { id: sprintId } = event.pathParameters
   const pool = await getPool()
 
+  console.log('[getMySprintPicks]', { userId: user.id, sprintId })
+
+  const rawCount = await pool.query(
+    `SELECT COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE g.sprint_id = $2) AS by_gw_sprint,
+            COUNT(*) FILTER (WHERE uge.sprint_id = $2) AS by_uge_sprint
+     FROM user_picks up
+     JOIN gameweeks g ON g.id = up.gameweek_id
+     LEFT JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+     WHERE up.user_id = $1`,
+    [user.id, sprintId]
+  )
+  console.log('[getMySprintPicks] rawCount:', rawCount.rows[0])
+
   const { rows } = await pool.query(
     `SELECT
        g.sprint_week,
@@ -1168,6 +1184,7 @@ async function getMySprintPicks(event, user) {
     .sort((a, b) => Number(a) - Number(b))
     .map(w => byWeek[w])
 
+  console.log('[getMySprintPicks] rows:', rows.length, 'weeks:', weeks.length)
   return ok({ weeks })
 }
 
@@ -1175,6 +1192,8 @@ async function getMySprintPicks(event, user) {
 async function getUserSprintPicks(event, user) {
   const { id: targetUserId, sprintId } = event.pathParameters
   const pool = await getPool()
+
+  console.log('[getUserSprintPicks]', { targetUserId, sprintId })
 
   // For completed/archived sprints show all picks (lock filters don't apply to past sprints).
   // For live/scheduled sprints only show picks from locked or past-lock-time gameweeks.
@@ -1232,6 +1251,8 @@ async function getUserSprintPicks(event, user) {
   const weeks = Object.keys(byWeek)
     .sort((a, b) => Number(a) - Number(b))
     .map(w => byWeek[w])
+
+  console.log('[getUserSprintPicks] rows:', rows.length, 'weeks:', weeks.length)
 
   // Find earliest lock_time for picks in still-open gameweeks (future lock_time, not yet locked).
   // Only relevant for live sprints — lets the frontend show "Picks locked until [time]".
@@ -1400,9 +1421,10 @@ async function getPublicProfile(event, user) {
          usp.division_id,
          RANK() OVER (
            PARTITION BY usp.sprint_id, usp.division_id
-           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC
+           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, u.display_name ASC
          ) AS division_rank
        FROM user_sprint_progress usp
+       JOIN users u ON u.id = usp.user_id
        WHERE usp.settled_at IS NOT NULL
      ) ranked
      JOIN divisions d ON d.id = ranked.division_id
