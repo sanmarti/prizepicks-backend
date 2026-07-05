@@ -1176,6 +1176,9 @@ async function getUserSprintPicks(event, user) {
   const { id: targetUserId, sprintId } = event.pathParameters
   const pool = await getPool()
 
+  // For completed/archived sprints show all picks (lock filters don't apply to past sprints).
+  // For live/scheduled sprints only show picks from locked or past-lock-time gameweeks.
+  // Gameweeks with NULL lock_time are treated as always visible (admin omitted the field).
   const { rows } = await pool.query(
     `SELECT
        g.sprint_week,
@@ -1188,10 +1191,16 @@ async function getUserSprintPicks(event, user) {
      JOIN event_options eo          ON eo.id = up.event_option_id
      JOIN events e                  ON e.id  = up.event_id
      JOIN gameweeks g               ON g.id  = up.gameweek_id
+     JOIN sprints s                 ON s.id  = g.sprint_id
      LEFT JOIN fixtures f           ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      LEFT JOIN user_gameweek_entries uge ON uge.gameweek_id = up.gameweek_id AND uge.user_id = up.user_id
      WHERE up.user_id = $1 AND g.sprint_id = $2
-       AND (g.status IN ('LOCKED', 'FINISHED') OR g.lock_time < NOW())
+       AND (
+         s.status IN ('completed', 'archived')
+         OR g.status IN ('LOCKED', 'FINISHED')
+         OR g.lock_time IS NULL
+         OR g.lock_time < NOW()
+       )
      ORDER BY g.sprint_week ASC, e.match_time ASC, e.fixture_name ASC`,
     [targetUserId, sprintId]
   )
@@ -1224,13 +1233,16 @@ async function getUserSprintPicks(event, user) {
     .sort((a, b) => Number(a) - Number(b))
     .map(w => byWeek[w])
 
-  // Check if user has picks in a not-yet-locked gameweek
+  // Find earliest lock_time for picks in still-open gameweeks (future lock_time, not yet locked).
+  // Only relevant for live sprints — lets the frontend show "Picks locked until [time]".
   const lockedRes = await pool.query(
     `SELECT MIN(g.lock_time) AS locked_until
      FROM user_picks up
      JOIN gameweeks g ON g.id = up.gameweek_id
      WHERE up.user_id = $1 AND g.sprint_id = $2
-       AND g.status NOT IN ('LOCKED', 'FINISHED') AND g.lock_time >= NOW()`,
+       AND g.status NOT IN ('LOCKED', 'FINISHED')
+       AND g.lock_time IS NOT NULL
+       AND g.lock_time > NOW()`,
     [targetUserId, sprintId]
   )
   const locked_until = lockedRes.rows[0]?.locked_until ?? null
