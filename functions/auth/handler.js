@@ -83,6 +83,11 @@ async function login(event) {
   const valid = await bcrypt.compare(password, user.password_hash)
   if (!valid) return error(401, "Invalid credentials")
 
+  await pool.query(
+    "UPDATE users SET last_login_at = NOW(), login_count = login_count + 1 WHERE id = $1",
+    [user.id]
+  )
+
   const token = await signToken({
     userId:       user.id,
     email:        user.email,

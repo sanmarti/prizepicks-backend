@@ -80,27 +80,32 @@ exports.handler = async (event) => {
 
 // Determines WON/LOST for a single event option using the cached fixture row
 // and the structured result_key (falls back to label-based matching for legacy rows).
-function evaluateOption(resultKey, label, eventType, fixture, cornerTotal) {
+function evaluateOption(resultKey, label, eventType, fixture, cornerTotal, isKnockout = false) {
   const rk = resultKey || ''
   const lb = (label || '').toLowerCase()
 
+  const hTotal = fixture.home_goals ?? 0
+  const aTotal = fixture.away_goals ?? 0
+  const hFt = hTotal - (fixture.et_home ?? 0)
+  const aFt = aTotal - (fixture.et_away ?? 0)
+  const h = isKnockout ? hTotal : hFt
+  const a = isKnockout ? aTotal : aFt
+
+  // MATCH_RESULT is always 90-min only, regardless of knockout
   if (eventType === 'MATCH_RESULT') {
-    const h = fixture.home_goals ?? 0, a = fixture.away_goals ?? 0
-    if (rk === 'HOME_WIN'  || lb === 'home win')  return h > a ? 'WON' : 'LOST'
-    if (rk === 'AWAY_WIN'  || lb === 'away win')  return a > h ? 'WON' : 'LOST'
-    if (rk === 'DRAW'      || lb === 'draw')       return h === a ? 'WON' : 'LOST'
+    if (rk === 'HOME_WIN'  || lb === 'home win')  return hFt > aFt ? 'WON' : 'LOST'
+    if (rk === 'AWAY_WIN'  || lb === 'away win')  return aFt > hFt ? 'WON' : 'LOST'
+    if (rk === 'DRAW'      || lb === 'draw')       return hFt === aFt ? 'WON' : 'LOST'
   }
 
   if (eventType === 'GOALS') {
-    const total = (fixture.home_goals ?? 0) + (fixture.away_goals ?? 0)
-    // result_key format: OVER_2.5 / UNDER_2.5
+    const total = h + a
     const rkMatch = rk.match(/^(OVER|UNDER)_([\d.]+)$/)
     if (rkMatch) {
       const threshold = parseFloat(rkMatch[2])
       return rkMatch[1] === 'OVER' ? (total > threshold ? 'WON' : 'LOST')
                                    : (total < threshold ? 'WON' : 'LOST')
     }
-    // Legacy label fallback
     const lbMatch = lb.match(/(over|under)\s+([\d.]+)/)
     if (lbMatch) {
       const threshold = parseFloat(lbMatch[2])
@@ -110,14 +115,12 @@ function evaluateOption(resultKey, label, eventType, fixture, cornerTotal) {
   }
 
   if (eventType === 'BTTS') {
-    const h = fixture.home_goals ?? 0, a = fixture.away_goals ?? 0
     const bothScored = h > 0 && a > 0
     if (rk === 'BTTS_YES' || lb.includes('yes') || lb.includes('both')) return bothScored ? 'WON' : 'LOST'
     if (rk === 'BTTS_NO'  || lb.includes('no'))                          return bothScored ? 'LOST' : 'WON'
   }
 
   if (eventType === 'CLEAN_SHEET') {
-    const h = fixture.home_goals ?? 0, a = fixture.away_goals ?? 0
     if (rk === 'HOME_CLEAN_SHEET' || lb.includes('home')) return a === 0 ? 'WON' : 'LOST'
     if (rk === 'AWAY_CLEAN_SHEET' || lb.includes('away')) return h === 0 ? 'WON' : 'LOST'
   }
@@ -130,7 +133,6 @@ function evaluateOption(resultKey, label, eventType, fixture, cornerTotal) {
       return rkMatch[1] === 'OVER' ? (total > threshold ? 'WON' : 'LOST')
                                    : (total < threshold ? 'WON' : 'LOST')
     }
-    // Legacy label fallback
     const lbMatch = lb.match(/(over|under)\s+([\d.]+)/)
     if (lbMatch) {
       const threshold = parseFloat(lbMatch[2])
@@ -140,7 +142,6 @@ function evaluateOption(resultKey, label, eventType, fixture, cornerTotal) {
   }
 
   if (eventType === 'PLAYER_SCORE') {
-    // Resolved separately via fixture_events table — handled in resolve()
     return null
   }
 
@@ -160,15 +161,14 @@ async function resolve(event, user) {
   if (gwResult.rows.length === 0) return error(404, "Gameweek not found or not in LOCKED status")
 
   const eventsResult = await pool.query(
-    "SELECT id, event_type, fixture_id, player_name FROM events WHERE gameweek_id = $1",
+    "SELECT id, event_type, fixture_id, player_name, is_knockout FROM events WHERE gameweek_id = $1",
     [gameweek_id]
   )
 
   for (const ev of eventsResult.rows) {
-    // Read fixture result from our DB (no live API call)
     const fixtureRow = ev.fixture_id
       ? (await pool.query(
-          "SELECT home_goals, away_goals, status_short FROM fixtures WHERE id = $1",
+          "SELECT home_goals, away_goals, et_home, et_away, status_short FROM fixtures WHERE id = $1",
           [ev.fixture_id]
         )).rows[0]
       : null
@@ -230,7 +230,7 @@ async function resolve(event, user) {
           result = scored ? 'LOST' : 'WON'
         }
       } else {
-        result = evaluateOption(opt.result_key, opt.label, ev.event_type, fixtureRow, cornerTotal)
+        result = evaluateOption(opt.result_key, opt.label, ev.event_type, fixtureRow, cornerTotal, ev.is_knockout ?? false)
         if (result === null) result = 'LOST'
       }
 
@@ -251,10 +251,10 @@ async function resolve(event, user) {
 
   const userScores = {}
   for (const pick of userPicks.rows) {
-    const pickStatus = pick.option_result === 'WON' ? 'WON' : 'LOST'
+    const pickStatus = pick.option_result === 'WON' ? 'won' : 'lost'
     await pool.query("UPDATE user_picks SET pick_status = $1 WHERE id = $2", [pickStatus, pick.pick_id])
     if (!userScores[pick.user_id]) userScores[pick.user_id] = 0
-    if (pickStatus === 'WON') userScores[pick.user_id]++
+    if (pickStatus === 'won') userScores[pick.user_id]++
   }
 
   // Also update the old card_picks flow if it exists

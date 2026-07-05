@@ -188,7 +188,7 @@ async function getGloryStatus(event, user) {
       `SELECT ranked.division_rank, ranked.division_total
        FROM (
          SELECT usp.user_id,
-           RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS division_rank,
+           RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC)::int AS division_rank,
            COUNT(*) OVER()::int AS division_total
          FROM user_sprint_progress usp
          WHERE usp.sprint_id = $1 AND usp.division_id = $2
@@ -567,7 +567,7 @@ async function getProfile(event, user) {
          usp.division_id,
          RANK() OVER (
            PARTITION BY usp.sprint_id, usp.division_id
-           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC
+           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC
          ) AS division_rank
        FROM user_sprint_progress usp
        WHERE usp.settled_at IS NOT NULL
@@ -616,7 +616,7 @@ async function getProfile(event, user) {
      FROM (
        SELECT usp.user_id, usp.sprint_id, usp.total_league_points, usp.total_correct_picks,
               usp.division_id,
-              RANK() OVER (PARTITION BY usp.sprint_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC) AS overall_rank
+              RANK() OVER (PARTITION BY usp.sprint_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC) AS overall_rank
        FROM user_sprint_progress usp
        WHERE usp.settled_at IS NOT NULL
      ) usp
@@ -708,7 +708,7 @@ async function getLeaderboard(event, user) {
        COALESCE(eu.energy_used, 0) AS energy_used,
        GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
        COALESCE(live.live_picks, 0) AS live_picks,
-       RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC) AS rank,
+       RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC) AS rank,
        COALESCE(lt.lifetime_correct, 0)::int   AS lifetime_correct,
        COALESCE(lt.lifetime_incorrect, 0)::int AS lifetime_incorrect
      FROM user_sprint_progress usp
@@ -725,7 +725,7 @@ async function getLeaderboard(event, user) {
        GROUP BY user_id
      ) lt ON lt.user_id = usp.user_id
      ${whereClause}
-     ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC
+     ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC
      LIMIT 100`,
     params
   )
@@ -792,14 +792,14 @@ async function getSprintDetail(event, user) {
               COALESCE(eu.energy_used, 0) AS energy_used,
               GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
               COALESCE(live.live_picks, 0) AS live_picks,
-              RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC) AS rank
+              RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC) AS rank
        FROM user_sprint_progress usp
        JOIN users u ON u.id=usp.user_id AND u.role='user'
        LEFT JOIN eu ON eu.user_id = usp.user_id
        LEFT JOIN ps ON ps.user_id = usp.user_id
        LEFT JOIN live ON live.user_id = usp.user_id
        WHERE usp.sprint_id=$1 AND usp.division_id=$2
-       ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC`,
+       ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC`,
       [sprintId, progress.division_id]
     )
     rankings = rankRes.rows
@@ -838,8 +838,8 @@ async function getSprintDetail(event, user) {
             COALESCE(eu.energy_used, 0) AS energy_used,
             GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
             COALESCE(live.live_picks, 0) AS live_picks,
-            RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS division_rank,
-            RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS overall_rank
+            RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS division_rank,
+            RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS overall_rank
      FROM user_sprint_progress usp
      JOIN users u ON u.id = usp.user_id AND u.role = 'user'
      LEFT JOIN divisions d ON d.id = usp.division_id
@@ -847,7 +847,7 @@ async function getSprintDetail(event, user) {
      LEFT JOIN ps ON ps.user_id = usp.user_id
      LEFT JOIN live ON live.user_id = usp.user_id
      WHERE usp.sprint_id = $1
-     ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC`,
+     ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC`,
     [sprintId]
   )
   overall_ranking = overallRows
@@ -893,14 +893,14 @@ async function getSprintDetail(event, user) {
                 COALESCE(eu.energy_used, 0) AS energy_used,
                 GREATEST(0, COALESCE(ps.total_submitted, 0) - usp.total_correct_picks - usp.total_incorrect_picks) AS pending_picks,
                 COALESCE(live.live_picks, 0) AS live_picks,
-                RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS rank
+                RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS rank
          FROM user_sprint_progress usp
          JOIN users u ON u.id = usp.user_id AND u.role = 'user'
          LEFT JOIN eu ON eu.user_id = usp.user_id
          LEFT JOIN ps ON ps.user_id = usp.user_id
          LEFT JOIN live ON live.user_id = usp.user_id
          WHERE usp.sprint_id=$1 AND usp.division_id=$2
-         ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC`,
+         ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC`,
         [sprintId, topDivId]
       )
       rankings = rankRes.rows
@@ -995,9 +995,14 @@ async function myRelevantSprints(event, user) {
        CASE WHEN usp.division_id IS NOT NULL THEN (
          SELECT COUNT(*)::int + 1
          FROM user_sprint_progress usp2
+         JOIN users u2 ON u2.id = usp2.user_id
          WHERE usp2.sprint_id = s.id AND usp2.division_id = usp.division_id
-           AND (usp2.total_league_points > usp.total_league_points
-             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks > usp.total_correct_picks))
+           AND (
+             usp2.total_league_points > usp.total_league_points
+             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks > usp.total_correct_picks)
+             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks = usp.total_correct_picks AND usp2.total_incorrect_picks < usp.total_incorrect_picks)
+             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks = usp.total_correct_picks AND usp2.total_incorrect_picks = usp.total_incorrect_picks AND u2.display_name < u.display_name)
+           )
        ) END AS my_rank,
        -- Total players in this division
        CASE WHEN usp.division_id IS NOT NULL THEN (
@@ -1008,14 +1013,20 @@ async function myRelevantSprints(event, user) {
        CASE WHEN usp.division_id IS NOT NULL THEN (
          SELECT COUNT(*)::int + 1
          FROM user_sprint_progress usp3
+         JOIN users u3 ON u3.id = usp3.user_id
          WHERE usp3.sprint_id = s.id
-           AND (usp3.total_league_points > usp.total_league_points
-             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks > usp.total_correct_picks))
+           AND (
+             usp3.total_league_points > usp.total_league_points
+             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks > usp.total_correct_picks)
+             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks = usp.total_correct_picks AND usp3.total_incorrect_picks < usp.total_incorrect_picks)
+             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks = usp.total_correct_picks AND usp3.total_incorrect_picks = usp.total_incorrect_picks AND u3.display_name < u.display_name)
+           )
        ) END AS my_global_rank,
        -- Total players across all divisions for this sprint
        (SELECT COUNT(*)::int FROM user_sprint_progress usp4 WHERE usp4.sprint_id = s.id) AS total_global_players
      FROM sprints s
      LEFT JOIN user_sprint_progress usp ON usp.sprint_id=s.id AND usp.user_id=$1
+     LEFT JOIN users u ON u.id = usp.user_id
      LEFT JOIN divisions d ON d.id=usp.division_id
      LEFT JOIN divisions fd ON fd.id=usp.final_division_id
      WHERE s.status IN ('live','scheduled','completed','archived')
@@ -1072,8 +1083,8 @@ async function myRelevantSprints(event, user) {
         `SELECT rank_in_div, overall_rank
          FROM (
            SELECT usp.user_id,
-                  RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS rank_in_div,
-                  RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC)::int AS overall_rank
+                  RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS rank_in_div,
+                  RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS overall_rank
            FROM user_sprint_progress usp
            JOIN users u ON u.id = usp.user_id AND u.role = 'user'
            LEFT JOIN (
@@ -1385,7 +1396,7 @@ async function getPublicProfile(event, user) {
          usp.division_id,
          RANK() OVER (
            PARTITION BY usp.sprint_id, usp.division_id
-           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC
+           ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC
          ) AS division_rank
        FROM user_sprint_progress usp
        WHERE usp.settled_at IS NOT NULL
@@ -1479,7 +1490,7 @@ async function getPublicProfile(event, user) {
         `SELECT ranked.division_rank, ranked.division_total
          FROM (
            SELECT usp.user_id,
-             RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC)::int AS division_rank,
+             RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, usp.total_incorrect_picks ASC, usp.user_id ASC)::int AS division_rank,
              COUNT(*) OVER()::int AS division_total
            FROM user_sprint_progress usp
            WHERE usp.sprint_id=$1 AND usp.division_id=$2

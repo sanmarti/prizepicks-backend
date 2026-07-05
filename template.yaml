@@ -542,6 +542,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/debug/fix-divisions
             Method: POST
+        AdminUpdateEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/events/{id}
+            Method: PATCH
         AdminResettleEvent:
           Type: HttpApi
           Properties:
