@@ -1129,12 +1129,12 @@ async function getMySprintPicks(event, user) {
        uge.correct_picks AS week_correct, uge.incorrect_picks AS week_incorrect,
        uge.league_points AS week_lp
      FROM user_picks up
-     JOIN event_options eo          ON eo.id = up.event_option_id
-     JOIN events e                  ON e.id  = up.event_id
+     LEFT JOIN event_options eo     ON eo.id = up.event_option_id
+     LEFT JOIN events e             ON e.id  = up.event_id
      JOIN gameweeks g               ON g.id  = up.gameweek_id
      LEFT JOIN fixtures f           ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      LEFT JOIN user_gameweek_entries uge ON uge.id = up.entry_id
-     WHERE up.user_id = $1 AND COALESCE(uge.sprint_id, g.sprint_id) = $2
+     WHERE up.user_id = $1 AND (g.sprint_id = $2 OR uge.sprint_id = $2)
      ORDER BY g.sprint_week ASC, e.match_time ASC, e.fixture_name ASC`,
     [user.id, sprintId]
   )
@@ -1188,13 +1188,13 @@ async function getUserSprintPicks(event, user) {
        uge.correct_picks AS week_correct, uge.incorrect_picks AS week_incorrect,
        uge.league_points AS week_lp
      FROM user_picks up
-     JOIN event_options eo          ON eo.id = up.event_option_id
-     JOIN events e                  ON e.id  = up.event_id
+     LEFT JOIN event_options eo     ON eo.id = up.event_option_id
+     LEFT JOIN events e             ON e.id  = up.event_id
      JOIN gameweeks g               ON g.id  = up.gameweek_id
      LEFT JOIN fixtures f           ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      LEFT JOIN user_gameweek_entries uge ON uge.id = up.entry_id
-     JOIN sprints s                 ON s.id  = COALESCE(uge.sprint_id, g.sprint_id)
-     WHERE up.user_id = $1 AND COALESCE(uge.sprint_id, g.sprint_id) = $2
+     JOIN sprints s                 ON s.id  = $2
+     WHERE up.user_id = $1 AND (g.sprint_id = $2 OR uge.sprint_id = $2)
        AND (
          s.status IN ('completed', 'archived')
          OR g.status IN ('LOCKED', 'FINISHED')
@@ -1240,7 +1240,7 @@ async function getUserSprintPicks(event, user) {
      FROM user_picks up
      JOIN gameweeks g ON g.id = up.gameweek_id
      LEFT JOIN user_gameweek_entries uge ON uge.id = up.entry_id
-     WHERE up.user_id = $1 AND COALESCE(uge.sprint_id, g.sprint_id) = $2
+     WHERE up.user_id = $1 AND (g.sprint_id = $2 OR uge.sprint_id = $2)
        AND g.status NOT IN ('LOCKED', 'FINISHED')
        AND g.lock_time IS NOT NULL
        AND g.lock_time > NOW()`,
