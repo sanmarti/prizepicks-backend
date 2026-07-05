@@ -993,28 +993,13 @@ async function myRelevantSprints(event, user) {
        (SELECT icon FROM divisions WHERE display_order = d.display_order + 1 AND is_active = TRUE LIMIT 1) AS next_division_icon,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS gameweek_count,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id AND g.status IN ('PUBLISHED','LOCKED','FINISHED'))::int AS active_gameweeks,
-       -- User's rank within their division for this sprint
-       CASE WHEN usp.division_id IS NOT NULL THEN (
-         SELECT COUNT(*)::int + 1
-         FROM user_sprint_progress usp2
-         WHERE usp2.sprint_id = s.id AND usp2.division_id = usp.division_id
-           AND (usp2.total_league_points > usp.total_league_points
-             OR (usp2.total_league_points = usp.total_league_points AND usp2.total_correct_picks > usp.total_correct_picks))
-       ) END AS my_rank,
-       -- Total players in this division
+       -- Placeholder ranks (overwritten by accurate batch rank query below)
+       NULL::int AS my_rank,
        CASE WHEN usp.division_id IS NOT NULL THEN (
          SELECT COUNT(*)::int FROM user_sprint_progress usp2
          WHERE usp2.sprint_id = s.id AND usp2.division_id = usp.division_id
        ) END AS total_players,
-       -- User's rank across all divisions for this sprint
-       CASE WHEN usp.division_id IS NOT NULL THEN (
-         SELECT COUNT(*)::int + 1
-         FROM user_sprint_progress usp3
-         WHERE usp3.sprint_id = s.id
-           AND (usp3.total_league_points > usp.total_league_points
-             OR (usp3.total_league_points = usp.total_league_points AND usp3.total_correct_picks > usp.total_correct_picks))
-       ) END AS my_global_rank,
-       -- Total players across all divisions for this sprint
+       NULL::int AS my_global_rank,
        (SELECT COUNT(*)::int FROM user_sprint_progress usp4 WHERE usp4.sprint_id = s.id) AS total_global_players
      FROM sprints s
      LEFT JOIN user_sprint_progress usp ON usp.sprint_id=s.id AND usp.user_id=$1
@@ -1067,34 +1052,49 @@ async function myRelevantSprints(event, user) {
 
   const sprints = pastRows.map(s => ({ ...s, gameweeks: gwBySprintId[s.id] || [] }))
 
-  // Recompute accurate rank for live sprints using energy_used tiebreaker (matches leaderboard logic)
-  for (const s of sprints) {
-    if (s.status === 'live' && s.division_id) {
-      const rankRes = await pool.query(
-        `SELECT rank_in_div, overall_rank
-         FROM (
-           SELECT usp.user_id,
-                  RANK() OVER (PARTITION BY usp.division_id ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS rank_in_div,
-                  RANK() OVER (ORDER BY usp.total_league_points DESC, usp.total_correct_picks DESC, COALESCE(eu.energy_used, 0) ASC, usp.total_incorrect_picks ASC, u.display_name ASC)::int AS overall_rank
-           FROM user_sprint_progress usp
-           JOIN users u ON u.id = usp.user_id AND u.role = 'user'
-           LEFT JOIN (
-             SELECT uge.user_id, COALESCE(SUM(eo.energy_cost), 0)::int AS energy_used
-             FROM user_picks up
-             JOIN event_options eo ON eo.id = up.event_option_id
-             JOIN user_gameweek_entries uge ON uge.id = up.entry_id
-             JOIN gameweeks g ON g.id = uge.gameweek_id
-             WHERE g.sprint_id = $2
-             GROUP BY uge.user_id
-           ) eu ON eu.user_id = usp.user_id
-           WHERE usp.sprint_id = $2
-         ) ranked
-         WHERE user_id = $1`,
-        [user.id, s.id]
-      )
-      if (rankRes.rows.length > 0) {
-        s.my_rank        = rankRes.rows[0].rank_in_div
-        s.my_global_rank = rankRes.rows[0].overall_rank
+  // Compute accurate ranks for all sprints the user has participated in.
+  // Uses the exact same full tiebreaker chain as the leaderboard (LP → correct → energy ASC → incorrect ASC → name ASC).
+  // One batch query covering all sprint IDs avoids N separate per-sprint queries.
+  const participatedIds = pastRows.filter(s => s.division_id).map(s => s.id)
+  if (participatedIds.length > 0) {
+    const batchRankRes = await pool.query(
+      `SELECT ranked.sprint_id, ranked.rank_in_div, ranked.overall_rank
+       FROM (
+         SELECT usp.user_id, usp.sprint_id,
+                RANK() OVER (PARTITION BY usp.sprint_id, usp.division_id
+                             ORDER BY usp.total_league_points DESC,
+                                      usp.total_correct_picks DESC,
+                                      COALESCE(eu.energy_used, 0) ASC,
+                                      usp.total_incorrect_picks ASC,
+                                      u.display_name ASC)::int AS rank_in_div,
+                RANK() OVER (PARTITION BY usp.sprint_id
+                             ORDER BY usp.total_league_points DESC,
+                                      usp.total_correct_picks DESC,
+                                      COALESCE(eu.energy_used, 0) ASC,
+                                      usp.total_incorrect_picks ASC,
+                                      u.display_name ASC)::int AS overall_rank
+         FROM user_sprint_progress usp
+         JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+         LEFT JOIN (
+           SELECT uge.user_id, g.sprint_id, COALESCE(SUM(eo.energy_cost), 0)::int AS energy_used
+           FROM user_picks up
+           JOIN event_options eo ON eo.id = up.event_option_id
+           JOIN user_gameweek_entries uge ON uge.id = up.entry_id
+           JOIN gameweeks g ON g.id = uge.gameweek_id
+           WHERE g.sprint_id = ANY($2)
+           GROUP BY uge.user_id, g.sprint_id
+         ) eu ON eu.user_id = usp.user_id AND eu.sprint_id = usp.sprint_id
+         WHERE usp.sprint_id = ANY($2)
+       ) ranked
+       WHERE ranked.user_id = $1`,
+      [user.id, participatedIds]
+    )
+    const rankMap = {}
+    for (const r of batchRankRes.rows) rankMap[r.sprint_id] = r
+    for (const s of sprints) {
+      if (rankMap[s.id]) {
+        s.my_rank        = rankMap[s.id].rank_in_div
+        s.my_global_rank = rankMap[s.id].overall_rank
       }
     }
   }
