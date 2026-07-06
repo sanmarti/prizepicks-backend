@@ -617,6 +617,7 @@ Resources:
       FunctionName: prizepicks-glory-prod
       Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
       Handler: functions/glory/handler.handler
+      Timeout: 30
       Events:
         GloryStatus:
           Type: HttpApi
