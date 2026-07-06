@@ -396,6 +396,40 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/fixtures/refresh-results
             Method: POST
+        ListCompetitionsPublic:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PublicApi
+            Path: /competitions
+            Method: GET
+        PublicScores:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PublicApi
+            Path: /scores
+            Method: GET
+        PublicGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PublicApi
+            Path: /public/gameweek
+            Method: GET
+        Scores:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /scores
+            Method: GET
+
+  # --- ADMIN GLORY (6-to-Glory admin routes split out to stay under Lambda policy limit) ---
+  AdminGloryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prizepicks-admin-glory-prod
+      Role: arn:aws:iam::696715200075:role/prizepicks-role-lambda-prod
+      Handler: functions/admin/handler.handler
+      Timeout: 60
+      Events:
         # 6 to Glory – Divisions
         ListDivisions:
           Type: HttpApi
@@ -560,30 +594,6 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/debug/fix-who-qualifies
             Method: POST
-        ListCompetitionsPublic:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref PublicApi
-            Path: /competitions
-            Method: GET
-        PublicScores:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref PublicApi
-            Path: /scores
-            Method: GET
-        PublicGameweek:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref PublicApi
-            Path: /public/gameweek
-            Method: GET
-        Scores:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref PrizePicksApi
-            Path: /scores
-            Method: GET
 
   # --- LIFECYCLE (scheduled automation) ---
   LifecycleFunction:
