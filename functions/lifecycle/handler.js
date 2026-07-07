@@ -566,9 +566,12 @@ async function autoSettleFinishedEvents(pool) {
 // 5. Force-close gameweeks whose end_date has passed but are still open/locked
 async function autoCloseExpiredGameweeks(pool) {
   const { rows } = await pool.query(
-    `SELECT id FROM gameweeks
-     WHERE end_date IS NOT NULL AND end_date <= NOW()
-       AND status NOT IN ('FINISHED', 'DRAFT', 'CANCELLED')`
+    `SELECT g.id FROM gameweeks g
+     WHERE g.end_date IS NOT NULL AND g.end_date <= NOW()
+       AND g.status NOT IN ('FINISHED', 'DRAFT', 'CANCELLED')
+       AND NOT EXISTS (
+         SELECT 1 FROM events e WHERE e.gameweek_id = g.id AND e.match_time > NOW()
+       )`
   )
   let count = 0
   for (const { id: gwId } of rows) {
@@ -597,21 +600,21 @@ async function autoCloseExpiredGameweeks(pool) {
 
 // 6. Auto-settle sprints once all their gameweeks are FINISHED (or end_date passed as fallback)
 async function autoSettleClosedSprints(pool) {
-  // Primary trigger: all non-DRAFT gameweeks in the sprint are FINISHED
-  // Fallback: sprint end_date has passed (catches sprints with no/stuck gameweeks)
+  // Primary trigger: every gameweek in the sprint is FINISHED (DRAFT blocks settlement)
+  // Fallback: sprint end_date has passed (catches sprints with stuck gameweeks)
   const { rows } = await pool.query(
     `SELECT DISTINCT s.id
      FROM sprints s
      WHERE s.status = 'live'
        AND (
-         -- All gameweeks are finished (and there's at least one)
+         -- ALL gameweeks are FINISHED — DRAFT weeks intentionally block this
          (
-           (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id = s.id AND g.status != 'DRAFT') > 0
+           (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id = s.id) > 0
            AND NOT EXISTS (
-             SELECT 1 FROM gameweeks g WHERE g.sprint_id = s.id AND g.status NOT IN ('FINISHED', 'DRAFT', 'CANCELLED')
+             SELECT 1 FROM gameweeks g WHERE g.sprint_id = s.id AND g.status != 'FINISHED'
            )
          )
-         -- Fallback: end_date has passed
+         -- Fallback: sprint end_date has passed
          OR (s.end_date IS NOT NULL AND s.end_date <= NOW())
        )`
   )
