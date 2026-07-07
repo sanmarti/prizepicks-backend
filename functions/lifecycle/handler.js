@@ -598,21 +598,24 @@ async function autoCloseExpiredGameweeks(pool) {
   return count
 }
 
-// 6. Auto-settle sprints once all their gameweeks are FINISHED (or end_date passed as fallback)
+// 6. Auto-settle sprints once the last gameweek of the sprint is FINISHED
 async function autoSettleClosedSprints(pool) {
-  // Primary trigger: every gameweek in the sprint is FINISHED (DRAFT blocks settlement)
-  // Fallback: sprint end_date has passed (catches sprints with stuck gameweeks)
+  // Settle only when the gameweek with the highest sprint_week number is FINISHED.
+  // DRAFT/PUBLISHED/LOCKED weeks for later sprint_weeks naturally block settlement.
+  // Fallback: sprint end_date has passed (catches sprints with stuck gameweeks).
   const { rows } = await pool.query(
     `SELECT DISTINCT s.id
      FROM sprints s
      WHERE s.status = 'live'
        AND (
-         -- ALL gameweeks are FINISHED — DRAFT weeks intentionally block this
-         (
-           (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id = s.id) > 0
-           AND NOT EXISTS (
-             SELECT 1 FROM gameweeks g WHERE g.sprint_id = s.id AND g.status != 'FINISHED'
-           )
+         -- The last gameweek (highest sprint_week) is FINISHED
+         EXISTS (
+           SELECT 1 FROM gameweeks g
+           WHERE g.sprint_id = s.id
+             AND g.sprint_week = (
+               SELECT MAX(g2.sprint_week) FROM gameweeks g2 WHERE g2.sprint_id = s.id
+             )
+             AND g.status = 'FINISHED'
          )
          -- Fallback: sprint end_date has passed
          OR (s.end_date IS NOT NULL AND s.end_date <= NOW())
