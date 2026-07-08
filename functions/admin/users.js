@@ -374,17 +374,14 @@ async function getDashboard(event) {
         COUNT(up.id)::int                                              AS total_picks_ever,
         COUNT(CASE WHEN eo.result = 'WON'  THEN 1 END)::int           AS total_correct_ever,
         COUNT(CASE WHEN eo.result = 'LOST' THEN 1 END)::int           AS total_incorrect_ever,
-        COALESCE(SUM(usp.perfect_weeks), 0)::int                      AS total_perfect_weeks,
+        (SELECT COALESCE(SUM(usp2.perfect_weeks), 0)::int
+         FROM user_sprint_progress usp2
+         JOIN users u2 ON u2.id = usp2.user_id AND u2.role = 'user') AS total_perfect_weeks,
         COUNT(DISTINCT up.user_id)::int                               AS total_players_ever,
         COUNT(DISTINCT CASE WHEN eo.result IN ('WON','LOST') THEN up.user_id END)::int AS players_with_results
       FROM user_picks up
       JOIN users u ON u.id = up.user_id AND u.role = 'user'
-      JOIN event_options eo ON eo.id = up.event_option_id
-      CROSS JOIN (
-        SELECT COALESCE(SUM(usp2.perfect_weeks), 0) AS perfect_weeks
-        FROM user_sprint_progress usp2
-        JOIN users u2 ON u2.id = usp2.user_id AND u2.role = 'user'
-      ) usp`),
+      JOIN event_options eo ON eo.id = up.event_option_id`),
 
     // Current active sprint summary (real users only)
     pool.query(`
