@@ -38,7 +38,7 @@ async function getUserDetail(event) {
   const userId = event.pathParameters?.id
   if (!userId) return error(400, 'Missing user id')
 
-  const [userRes, sprintRes, gameweekRes, divisionRes, historyRes, matchweekRes] = await Promise.all([
+  const [userRes, sprintRes, gameweekRes, divisionRes, historyRes, matchweekRes, energyTxRes, extraEnergyRes] = await Promise.all([
     // Base user + energy
     pool.query(`
       SELECT u.id, u.email, u.display_name, u.role, u.created_at,
@@ -109,6 +109,22 @@ async function getUserDetail(event) {
       WHERE uge.user_id = $1
       ORDER BY COALESCE(g.lock_time, uge.created_at) DESC
     `, [userId]),
+
+    // Energy transaction history
+    pool.query(`
+      SELECT amount, type, description, created_at
+      FROM energy_transactions
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 30
+    `, [userId]),
+
+    // Extra energy purchased (from pack purchases)
+    pool.query(`
+      SELECT COALESCE(SUM(energy_amount), 0)::int AS extra_energy
+      FROM energy_pack_purchases
+      WHERE user_id = $1
+    `, [userId]),
   ])
 
   if (!userRes.rows.length) return error(404, 'User not found')
@@ -119,6 +135,8 @@ async function getUserDetail(event) {
   const division      = divisionRes.rows[0] ?? null
   const history       = historyRes.rows
   const matchweeks    = matchweekRes.rows
+  const energyHistory = energyTxRes.rows
+  const extraEnergy   = extraEnergyRes.rows[0]?.extra_energy ?? 0
 
   const totalCorrect   = gw.total_correct   ?? 0
   const totalIncorrect = gw.total_incorrect ?? 0
@@ -127,6 +145,7 @@ async function getUserDetail(event) {
 
   return ok({
     ...user,
+    extra_energy: extraEnergy,
     stats: {
       sprints_played:   sprints.length,
       matchweeks_played: gw.total_matchweeks ?? 0,
@@ -138,6 +157,7 @@ async function getUserDetail(event) {
     sprint_history:    sprints,
     division_history:  history,
     matchweek_history: matchweeks,
+    energy_history:    energyHistory,
   })
 }
 
@@ -152,38 +172,36 @@ async function adjustUserEnergy(event) {
 
   const description = body.description || 'Admin adjustment'
 
-  await pool.query('BEGIN')
+  const client = await pool.connect()
   try {
-    // Upsert wallet
-    await pool.query(
-      `INSERT INTO energy_wallets (user_id, balance)
-       VALUES ($1, 0)
-       ON CONFLICT (user_id) DO NOTHING`,
+    await client.query('BEGIN')
+
+    await client.query(
+      `INSERT INTO energy_wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
       [userId]
     )
 
-    // Apply delta, prevent balance going below 0
-    const { rows } = await pool.query(
-      `UPDATE energy_wallets
-       SET balance = GREATEST(0, balance + $1)
-       WHERE user_id = $2
-       RETURNING balance`,
+    const { rows } = await client.query(
+      `UPDATE energy_wallets SET balance = GREATEST(0, balance + $1) WHERE user_id = $2 RETURNING balance`,
       [amount, userId]
     )
-    if (!rows.length) { await pool.query('ROLLBACK'); return error(404, 'User not found') }
+    if (!rows.length) {
+      await client.query('ROLLBACK')
+      return error(404, 'User not found')
+    }
 
-    // Record transaction
-    await pool.query(
-      `INSERT INTO energy_transactions (user_id, amount, type, description)
-       VALUES ($1, $2, 'ADMIN_ADJUSTMENT', $3)`,
+    await client.query(
+      `INSERT INTO energy_transactions (user_id, amount, type, description) VALUES ($1, $2, 'REWARD', $3)`,
       [userId, amount, description]
     )
 
-    await pool.query('COMMIT')
+    await client.query('COMMIT')
     return ok({ balance: rows[0].balance })
   } catch (e) {
-    await pool.query('ROLLBACK')
+    await client.query('ROLLBACK')
     throw e
+  } finally {
+    client.release()
   }
 }
 
