@@ -1210,6 +1210,7 @@ async function getUserSprintPicks(event, user) {
      LEFT JOIN fixtures f           ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
      LEFT JOIN user_gameweek_entries uge ON uge.id = up.entry_id
      WHERE up.user_id = $1 AND (g.sprint_id = $2 OR uge.sprint_id = $2)
+       AND (g.status IN ('LOCKED', 'FINISHED') OR g.lock_time <= NOW())
      ORDER BY g.sprint_week ASC, e.match_time ASC, e.fixture_name ASC`,
     [targetUserId, sprintId]
   )
