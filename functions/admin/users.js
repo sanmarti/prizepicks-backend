@@ -1,8 +1,19 @@
 const { getPool } = require('../../shared/db')
 const { ok, error } = require('../../shared/response')
 
+async function ensureTempPasswordTable(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_temp_passwords (
+      user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      temp_password TEXT NOT NULL,
+      created_at  TIMESTAMPTZ DEFAULT now()
+    )
+  `)
+}
+
 async function listUsers() {
   const pool = await getPool()
+  await ensureTempPasswordTable(pool)
   const { rows } = await pool.query(`
     SELECT
       u.id, u.email, u.display_name, u.role, u.created_at,
@@ -20,7 +31,21 @@ async function listUsers() {
                 WHERE usp.user_id = u.id), 0)::int                                     AS total_incorrect,
       (SELECT json_build_object('name', d.name, 'icon', d.icon, 'is_rookie', uds.is_rookie)
        FROM user_division_status uds JOIN divisions d ON d.id = uds.division_id
-       WHERE uds.user_id = u.id LIMIT 1)                                               AS current_division
+       WHERE uds.user_id = u.id LIMIT 1)                                               AS current_division,
+      (SELECT utp.temp_password FROM user_temp_passwords utp
+       WHERE utp.user_id = u.id LIMIT 1)                                               AS temp_password,
+      (SELECT uge.picks_submitted
+       FROM user_gameweek_entries uge
+       WHERE uge.user_id = u.id
+         AND uge.gameweek_id = (
+           SELECT g.id FROM gameweeks g
+           JOIN sprints s ON s.id = g.sprint_id
+           WHERE s.status = 'live'
+             AND g.status NOT IN ('DRAFT', 'CANCELLED')
+           ORDER BY g.sprint_week DESC
+           LIMIT 1
+         )
+       LIMIT 1)                                                                         AS current_gw_picks_submitted
     FROM users u
     LEFT JOIN energy_wallets ew ON ew.user_id = u.id
     ORDER BY u.created_at DESC
@@ -450,4 +475,57 @@ async function getDashboard(event) {
   })
 }
 
-module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard }
+async function resetUserPassword(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  const check = await pool.query("SELECT id, email, role FROM users WHERE id=$1", [id])
+  if (!check.rows.length) return error(404, "User not found")
+  if (check.rows[0].role === 'admin') return error(403, "Cannot reset admin passwords")
+
+  await ensureTempPasswordTable(pool)
+
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
+  const newPassword = Array.from(require('crypto').randomBytes(12))
+    .map(b => chars[b % chars.length]).join('')
+  const hash = await require('bcryptjs').hash(newPassword, 10)
+
+  await pool.query("UPDATE users SET password_hash=$1 WHERE id=$2", [hash, id])
+  await pool.query(`
+    INSERT INTO user_temp_passwords (user_id, temp_password)
+    VALUES ($1, $2)
+    ON CONFLICT (user_id) DO UPDATE SET temp_password=$2, created_at=now()
+  `, [id, newPassword])
+
+  return ok({ password: newPassword, email: check.rows[0].email })
+}
+
+async function deleteUser(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  const check = await pool.query("SELECT id, email, role FROM users WHERE id=$1", [id])
+  if (!check.rows.length) return error(404, "User not found")
+  if (check.rows[0].role === 'admin') return error(403, "Cannot delete admin accounts")
+
+  await pool.query("DELETE FROM user_picks WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM user_gameweek_entries WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM user_sprint_progress WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM promotion_relegation_history WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM user_division_status WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM user_badges WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM leagues WHERE creator_id=$1", [id])
+  await pool.query("DELETE FROM league_members WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM matchups WHERE home_user_id=$1 OR away_user_id=$1 OR winner_user_id=$1", [id])
+  await pool.query("DELETE FROM standings WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM user_cards WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM energy_transactions WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM energy_wallets WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM energy_pack_purchases WHERE user_id=$1", [id])
+  await pool.query("DELETE FROM admin_audit_log WHERE admin_user_id=$1", [id])
+  await pool.query("DELETE FROM users WHERE id=$1", [id])
+
+  return ok({ deleted: true, email: check.rows[0].email })
+}
+
+module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword }
