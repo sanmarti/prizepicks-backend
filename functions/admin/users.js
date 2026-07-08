@@ -225,7 +225,7 @@ async function listLeagues() {
 async function getStats() {
   const pool = await getPool()
   const [users, leagues, gameweeks] = await Promise.all([
-    pool.query("SELECT COUNT(*)::int AS count FROM users"),
+    pool.query("SELECT COUNT(*)::int AS count FROM users WHERE role = 'user'"),
     pool.query("SELECT COUNT(*)::int AS count FROM leagues"),
     pool.query("SELECT COUNT(*)::int AS count FROM gameweeks"),
   ])
@@ -262,105 +262,113 @@ async function getDashboard(event) {
     gameStats,
     currentSprint,
   ] = await Promise.all([
-    // Total users
-    pool.query(`SELECT COUNT(*)::int AS count FROM users`),
+    // Total real users
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'user'`),
 
-    // New users today
-    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '1 day'`),
+    // New real users today
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'user' AND created_at >= NOW() - INTERVAL '1 day'`),
 
-    // New users this week
-    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '7 days'`),
+    // New real users this week
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'user' AND created_at >= NOW() - INTERVAL '7 days'`),
 
-    // New users in selected range
-    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= NOW() - INTERVAL '${interval}'`),
+    // New real users in selected range
+    pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'user' AND created_at >= NOW() - INTERVAL '${interval}'`),
 
-    // User growth (by day, range-aware)
+    // User growth by day (real users only)
     pool.query(`
       SELECT DATE(created_at) AS day, COUNT(*)::int AS new_users
       FROM users
-      WHERE created_at >= NOW() - INTERVAL '${interval}'
+      WHERE role = 'user' AND created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
-    // Active users in range (submitted picks)
+    // Active real users in range (submitted picks)
     pool.query(`
-      SELECT COUNT(DISTINCT user_id)::int AS count
-      FROM user_picks
-      WHERE created_at >= NOW() - INTERVAL '${interval}'`),
+      SELECT COUNT(DISTINCT up.user_id)::int AS count
+      FROM user_picks up
+      JOIN users u ON u.id = up.user_id AND u.role = 'user'
+      WHERE up.created_at >= NOW() - INTERVAL '${interval}'`),
 
-    // Total picks in range
+    // Total picks by real users in range
     pool.query(`
       SELECT COUNT(*)::int AS count
-      FROM user_picks
-      WHERE created_at >= NOW() - INTERVAL '${interval}'`),
+      FROM user_picks up
+      JOIN users u ON u.id = up.user_id AND u.role = 'user'
+      WHERE up.created_at >= NOW() - INTERVAL '${interval}'`),
 
-    // Revenue totals (all time)
+    // Revenue totals (all time, real users only)
     pool.query(`
       SELECT
         COUNT(*)::int                        AS total_purchases,
-        COALESCE(SUM(price_euros), 0)::float AS total_revenue,
-        COUNT(DISTINCT user_id)::int         AS paying_users
-      FROM energy_pack_purchases`),
+        COALESCE(SUM(p.price_euros), 0)::float AS total_revenue,
+        COUNT(DISTINCT p.user_id)::int         AS paying_users
+      FROM energy_pack_purchases p
+      JOIN users u ON u.id = p.user_id AND u.role = 'user'`),
 
-    // Revenue by day (range-aware)
+    // Revenue by day (real users, range-aware)
     pool.query(`
       SELECT
-        DATE(created_at)                     AS day,
-        COUNT(*)::int                        AS purchases,
-        COALESCE(SUM(price_euros), 0)::float AS revenue
-      FROM energy_pack_purchases
-      WHERE created_at >= NOW() - INTERVAL '${interval}'
+        DATE(p.created_at)                     AS day,
+        COUNT(*)::int                          AS purchases,
+        COALESCE(SUM(p.price_euros), 0)::float AS revenue
+      FROM energy_pack_purchases p
+      JOIN users u ON u.id = p.user_id AND u.role = 'user'
+      WHERE p.created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
-    // Revenue by month (last 12 months)
+    // Revenue by month (real users, last 12 months)
     pool.query(`
       SELECT
-        TO_CHAR(DATE_TRUNC('month', created_at), 'YYYY-MM') AS month,
-        COUNT(*)::int                                        AS purchases,
-        COALESCE(SUM(price_euros), 0)::float                AS revenue
-      FROM energy_pack_purchases
-      WHERE created_at >= NOW() - INTERVAL '12 months'
+        TO_CHAR(DATE_TRUNC('month', p.created_at), 'YYYY-MM') AS month,
+        COUNT(*)::int                                          AS purchases,
+        COALESCE(SUM(p.price_euros), 0)::float                AS revenue
+      FROM energy_pack_purchases p
+      JOIN users u ON u.id = p.user_id AND u.role = 'user'
+      WHERE p.created_at >= NOW() - INTERVAL '12 months'
       GROUP BY month ORDER BY month ASC`),
 
-    // Top spenders (all time)
+    // Top spenders (real users only)
     pool.query(`
       SELECT u.id, u.display_name, u.email,
              COUNT(p.id)::int                        AS purchases,
              COALESCE(SUM(p.price_euros), 0)::float  AS total_spent,
              COALESCE(SUM(p.energy_amount), 0)::int  AS energy_bought
       FROM energy_pack_purchases p
-      JOIN users u ON u.id = p.user_id
+      JOIN users u ON u.id = p.user_id AND u.role = 'user'
       GROUP BY u.id, u.display_name, u.email
       ORDER BY total_spent DESC
       LIMIT 10`),
 
-    // Division distribution — real table
+    // Division distribution (real users only)
     pool.query(`
       SELECT d.name, d.icon, d.display_order, d.color_primary,
              COUNT(uds.user_id)::int AS count
       FROM user_division_status uds
       JOIN divisions d ON d.id = uds.division_id
+      JOIN users u ON u.id = uds.user_id AND u.role = 'user'
       GROUP BY d.name, d.icon, d.display_order, d.color_primary
       ORDER BY d.display_order ASC`),
 
-    // Picks trend (range-aware)
+    // Picks trend by day (real users only)
     pool.query(`
-      SELECT DATE(created_at) AS day, COUNT(*)::int AS picks
-      FROM user_picks
-      WHERE created_at >= NOW() - INTERVAL '${interval}'
+      SELECT DATE(up.created_at) AS day, COUNT(*)::int AS picks
+      FROM user_picks up
+      JOIN users u ON u.id = up.user_id AND u.role = 'user'
+      WHERE up.created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
-    // Pack sales breakdown
+    // Pack sales breakdown (real users only)
     pool.query(`
-      SELECT pack_name AS name,
-             MIN(price_euros)::float                 AS price_euros,
-             MIN(energy_amount)::int                 AS energy_amount,
-             COUNT(*)::int                           AS units_sold,
-             COALESCE(SUM(price_euros), 0)::float    AS revenue
-      FROM energy_pack_purchases
-      GROUP BY pack_name
+      SELECT p.pack_name AS name,
+             MIN(p.price_euros)::float                 AS price_euros,
+             MIN(p.energy_amount)::int                 AS energy_amount,
+             COUNT(*)::int                             AS units_sold,
+             COALESCE(SUM(p.price_euros), 0)::float    AS revenue
+      FROM energy_pack_purchases p
+      JOIN users u ON u.id = p.user_id AND u.role = 'user'
+      GROUP BY p.pack_name
       ORDER BY revenue DESC`),
 
-    // Game stats: all-time picks, accuracy, perfect weeks
+    // Game stats: all-time picks, accuracy, perfect weeks (real users only)
     pool.query(`
       SELECT
         COUNT(up.id)::int                                              AS total_picks_ever,
@@ -370,10 +378,15 @@ async function getDashboard(event) {
         COUNT(DISTINCT up.user_id)::int                               AS total_players_ever,
         COUNT(DISTINCT CASE WHEN eo.result IN ('WON','LOST') THEN up.user_id END)::int AS players_with_results
       FROM user_picks up
+      JOIN users u ON u.id = up.user_id AND u.role = 'user'
       JOIN event_options eo ON eo.id = up.event_option_id
-      CROSS JOIN (SELECT COALESCE(SUM(perfect_weeks),0) AS perfect_weeks FROM user_sprint_progress) usp`),
+      CROSS JOIN (
+        SELECT COALESCE(SUM(usp2.perfect_weeks), 0) AS perfect_weeks
+        FROM user_sprint_progress usp2
+        JOIN users u2 ON u2.id = usp2.user_id AND u2.role = 'user'
+      ) usp`),
 
-    // Current active sprint summary
+    // Current active sprint summary (real users only)
     pool.query(`
       SELECT s.id, s.name, s.status, s.start_date, s.end_date,
              COUNT(DISTINCT usp.user_id)::int                  AS active_players,
@@ -386,7 +399,10 @@ async function getDashboard(event) {
              (SELECT COUNT(*)::int FROM gameweeks g WHERE g.sprint_id = s.id AND g.status = 'FINISHED')  AS gw_finished,
              (SELECT COUNT(*)::int FROM gameweeks g WHERE g.sprint_id = s.id)                            AS gw_total
       FROM sprints s
-      LEFT JOIN user_sprint_progress usp ON usp.sprint_id = s.id
+      LEFT JOIN (
+        SELECT usp2.* FROM user_sprint_progress usp2
+        JOIN users u ON u.id = usp2.user_id AND u.role = 'user'
+      ) usp ON usp.sprint_id = s.id
       WHERE s.status IN ('live', 'scheduled')
       GROUP BY s.id, s.name, s.status, s.start_date, s.end_date
       ORDER BY s.start_date ASC
