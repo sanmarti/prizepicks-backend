@@ -629,16 +629,64 @@ async function earlySettleGameweek(event) {
   return ok(result)
 }
 
-// Auto-trigger — called after every fixture score refresh.
-// Finds all LOCKED gameweeks and runs early settlement on each.
+// Auto-trigger — refreshes live fixture scores for all LOCKED gameweeks then settles.
+// Called after getPublicScores refreshes, but also self-sufficient so it doesn't
+// depend on users visiting a specific date's score page.
 async function autoEarlySettleLockedGameweeks(pool) {
   try {
     const { rows: locked } = await pool.query(
       "SELECT id FROM gameweeks WHERE status = 'LOCKED'"
     )
+    if (!locked.length) return
+
+    // Find all non-finished fixtures in locked gameweeks and refresh their scores
+    const { rows: staleFixtures } = await pool.query(
+      `SELECT DISTINCT f.id AS fixture_id
+       FROM fixtures f
+       JOIN events e ON e.fixture_id::bigint = f.id
+       JOIN gameweeks g ON g.id = e.gameweek_id
+       WHERE g.status = 'LOCKED'
+         AND f.status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
+         AND f.updated_at < NOW() - INTERVAL '3 minutes'`
+    )
+
+    if (staleFixtures.length > 0) {
+      const secrets = await getSecrets()
+      for (const fx of staleFixtures) {
+        try {
+          const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+            params: { id: fx.fixture_id },
+            headers: { 'x-apisports-key': secrets.key },
+            timeout: 6000,
+          })
+          const apiFixtures = res.data?.response || []
+          if (apiFixtures.length > 0) {
+            const f = apiFixtures[0]
+            await pool.query(
+              `UPDATE fixtures SET
+                 home_goals=$1, away_goals=$2,
+                 status_short=$3, status_elapsed=$4,
+                 home_winner=$5, away_winner=$6,
+                 updated_at=NOW()
+               WHERE id=$7`,
+              [
+                f.goals.home, f.goals.away,
+                f.fixture.status.short, f.fixture.status.elapsed,
+                f.teams.home.winner, f.teams.away.winner,
+                fx.fixture_id,
+              ]
+            )
+          }
+        } catch (e) {
+          console.error(`[early-settle] fixture refresh failed for ${fx.fixture_id}:`, e.message)
+        }
+      }
+    }
+
+    // Now run early settlement on all locked gameweeks
     for (const gw of locked) {
       const result = await runEarlySettlement(pool, gw.id)
-      if (result && (result.early_settled_picks > 0)) {
+      if (result && result.early_settled_picks > 0) {
         console.log(`[early-settle] gw ${gw.id}: ${result.early_settled_picks} picks, ${result.lp_awarded} entries LP awarded`)
       }
     }
