@@ -286,6 +286,7 @@ async function getDashboard(event) {
     packSales,
     gameStats,
     currentSprint,
+    dauTrend,
   ] = await Promise.all([
     // Total real users
     pool.query(`SELECT COUNT(*)::int AS count FROM users WHERE role = 'user'`),
@@ -381,6 +382,14 @@ async function getDashboard(event) {
       WHERE up.created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
+    // Daily active users by day — distinct users who made picks (real users only)
+    pool.query(`
+      SELECT DATE(up.created_at) AS day, COUNT(DISTINCT up.user_id)::int AS dau
+      FROM user_picks up
+      JOIN users u ON u.id = up.user_id AND u.role = 'user'
+      WHERE up.created_at >= NOW() - INTERVAL '${interval}'
+      GROUP BY day ORDER BY day ASC`),
+
     // Pack sales breakdown (real users only)
     pool.query(`
       SELECT p.pack_name AS name,
@@ -452,6 +461,7 @@ async function getDashboard(event) {
       participation_rate: total > 0 ? Math.round((activeCount / total) * 1000) / 10 : 0,
       total_picks_range:  totalPicksRange.rows[0].count,
       picks_trend_by_day: picksTrend.rows,
+      dau_by_day:         dauTrend.rows,
     },
     revenue: {
       total_purchases: revenueTotal.rows[0].total_purchases,
