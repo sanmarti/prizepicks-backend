@@ -489,7 +489,7 @@ async function earlySettleGameweek(event) {
   let varSkipped = 0
 
   for (const ev of events) {
-    if (!ev.fixture_id || !['BTTS', 'GOALS'].includes(ev.event_type)) continue
+    if (!ev.fixture_id || !['BTTS', 'GOALS', 'CLEAN_SHEET'].includes(ev.event_type)) continue
 
     // Get live score + goal event counts in one query to detect VAR
     const fixRes = await pool.query(
@@ -529,20 +529,30 @@ async function earlySettleGameweek(event) {
     for (const opt of options) {
       let earlyResult = null
 
-      if (ev.event_type === 'BTTS' && opt.result_key === 'BTTS_YES' && h > 0 && a > 0) {
-        earlyResult = 'WON'
+      if (ev.event_type === 'BTTS') {
+        const bothScored = h > 0 && a > 0
+        if (opt.result_key === 'BTTS_YES' && bothScored) earlyResult = 'WON'
+        if (opt.result_key === 'BTTS_NO'  && bothScored) earlyResult = 'LOST'
       }
       if (ev.event_type === 'GOALS') {
-        const m = opt.result_key?.match(/^OVER_([\d.]+)$/)
-        if (m && total > parseFloat(m[1])) earlyResult = 'WON'
+        const m = opt.result_key?.match(/^(OVER|UNDER)_([\d.]+)$/)
+        if (m) {
+          const t = parseFloat(m[2])
+          if (m[1] === 'OVER'  && total > t) earlyResult = 'WON'
+          if (m[1] === 'UNDER' && total > t) earlyResult = 'LOST'
+        }
+      }
+      if (ev.event_type === 'CLEAN_SHEET') {
+        if (opt.result_key === 'HOME_CLEAN_SHEET' && a > 0) earlyResult = 'LOST'
+        if (opt.result_key === 'AWAY_CLEAN_SHEET' && h > 0) earlyResult = 'LOST'
       }
 
       if (!earlyResult) continue
 
       await pool.query("UPDATE event_options SET result = $1 WHERE id = $2", [earlyResult, opt.id])
       const { rowCount } = await pool.query(
-        "UPDATE user_picks SET pick_status = 'won' WHERE event_option_id = $1 AND pick_status = 'pending'",
-        [opt.id]
+        "UPDATE user_picks SET pick_status = $1 WHERE event_option_id = $2 AND pick_status = 'pending'",
+        [earlyResult === 'WON' ? 'won' : 'lost', opt.id]
       )
       settledOptions++
       settledPicks += rowCount
