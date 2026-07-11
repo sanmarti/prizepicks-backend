@@ -3,7 +3,7 @@ const { v4: uuidv4 } = require('uuid')
 const { getPool } = require('../../shared/db')
 const { getSecrets } = require('../../shared/ssm')
 const { ok, error } = require('../../shared/response')
-const { probToEnergyCost } = require('./gameweeks')
+const { probToEnergyCost, autoEarlySettleLockedGameweeks } = require('./gameweeks')
 
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
@@ -807,8 +807,12 @@ async function getPublicScores(event) {
           const rows = apiFixtures
             .filter(f => compMap[String(f.league.id)])
             .map(f => apiFixtureToRow(f, compMap[String(f.league.id)]))
-          if (rows.length > 0) await upsertFixtures(pool, rows)
-          console.log(`[scores] auto-refreshed ${rows.length}/${apiFixtures.length} fixtures for ${date}`)
+          if (rows.length > 0) {
+            await upsertFixtures(pool, rows)
+            console.log(`[scores] auto-refreshed ${rows.length}/${apiFixtures.length} fixtures for ${date}`)
+            // Scores updated — run early settlement for any locked gameweeks
+            autoEarlySettleLockedGameweeks(pool)
+          }
         }
       }
     } catch (e) {

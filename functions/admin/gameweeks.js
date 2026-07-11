@@ -458,25 +458,14 @@ function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers
   return 'LOST'
 }
 
-// ── Early-settle in-progress events ──────────────────────────────────────────
-// Awards WON to picks whose outcome is already mathematically certain mid-game:
-//   BTTS_YES  — once both teams have scored
-//   GOALS OVER_X — once total confirmed goals exceed X
-//
-// VAR safety: goals are only trusted when the fixture score matches the
-// confirmed event log (fixture_events Goal count minus VAR cancellations).
-// If the counts disagree a review is likely in progress — we skip that fixture.
-//
-// Losses and UNDER/BTTS_NO are never early-settled; they need the full 90 min.
-async function earlySettleGameweek(event) {
-  const { id: gameweek_id } = event.pathParameters
-  const pool = await getPool()
+// ── Early-settle core — called automatically after score refresh ──────────────
+async function runEarlySettlement(pool, gameweek_id) {
 
   const gwRes = await pool.query(
     "SELECT id FROM gameweeks WHERE id = $1 AND status = 'LOCKED'",
     [gameweek_id]
   )
-  if (!gwRes.rows.length) return error(404, "Gameweek not found or not LOCKED")
+  if (!gwRes.rows.length) return null
 
   const { rows: events } = await pool.query(
     "SELECT id, event_type, fixture_id FROM events WHERE gameweek_id = $1",
@@ -628,7 +617,34 @@ async function earlySettleGameweek(event) {
     }
   }
 
-  return ok({ early_settled_options: settledOptions, early_settled_picks: settledPicks, var_skipped: varSkipped, lp_awarded: lpAwarded, gameweek_id })
+  return { early_settled_options: settledOptions, early_settled_picks: settledPicks, var_skipped: varSkipped, lp_awarded: lpAwarded, gameweek_id }
+}
+
+// HTTP handler — manual trigger from admin panel
+async function earlySettleGameweek(event) {
+  const { id: gameweek_id } = event.pathParameters
+  const pool = await getPool()
+  const result = await runEarlySettlement(pool, gameweek_id)
+  if (!result) return error(404, "Gameweek not found or not LOCKED")
+  return ok(result)
+}
+
+// Auto-trigger — called after every fixture score refresh.
+// Finds all LOCKED gameweeks and runs early settlement on each.
+async function autoEarlySettleLockedGameweeks(pool) {
+  try {
+    const { rows: locked } = await pool.query(
+      "SELECT id FROM gameweeks WHERE status = 'LOCKED'"
+    )
+    for (const gw of locked) {
+      const result = await runEarlySettlement(pool, gw.id)
+      if (result && (result.early_settled_picks > 0)) {
+        console.log(`[early-settle] gw ${gw.id}: ${result.early_settled_picks} picks, ${result.lp_awarded} entries LP awarded`)
+      }
+    }
+  } catch (e) {
+    console.error('[early-settle] auto run failed:', e.message)
+  }
 }
 
 function adminNorm(s) {
@@ -639,5 +655,6 @@ function adminLastName(s) { const p=s.split(' ').filter(w=>w.length>1); return p
 module.exports = {
   importFixtures, createGameweek, getGameweek, updateGameweek, publishGameweek,
   lockGameweek, unlockGameweek, resolveGameweek, earlySettleGameweek,
+  autoEarlySettleLockedGameweeks,
   adminEvaluateOption, probToEnergyCost,
 }
