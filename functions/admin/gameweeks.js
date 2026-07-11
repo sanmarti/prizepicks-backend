@@ -458,6 +458,100 @@ function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers
   return 'LOST'
 }
 
+// ── Early-settle in-progress events ──────────────────────────────────────────
+// Awards WON to picks whose outcome is already mathematically certain mid-game:
+//   BTTS_YES  — once both teams have scored
+//   GOALS OVER_X — once total confirmed goals exceed X
+//
+// VAR safety: goals are only trusted when the fixture score matches the
+// confirmed event log (fixture_events Goal count minus VAR cancellations).
+// If the counts disagree a review is likely in progress — we skip that fixture.
+//
+// Losses and UNDER/BTTS_NO are never early-settled; they need the full 90 min.
+async function earlySettleGameweek(event) {
+  const { id: gameweek_id } = event.pathParameters
+  const pool = await getPool()
+
+  const gwRes = await pool.query(
+    "SELECT id FROM gameweeks WHERE id = $1 AND status = 'LOCKED'",
+    [gameweek_id]
+  )
+  if (!gwRes.rows.length) return error(404, "Gameweek not found or not LOCKED")
+
+  const { rows: events } = await pool.query(
+    "SELECT id, event_type, fixture_id FROM events WHERE gameweek_id = $1",
+    [gameweek_id]
+  )
+
+  const DONE = ['FT', 'AET', 'PEN', 'AWD', 'WO', 'PST', 'CANC', 'ABD']
+  let settledPicks = 0
+  let settledOptions = 0
+  let varSkipped = 0
+
+  for (const ev of events) {
+    if (!ev.fixture_id || !['BTTS', 'GOALS'].includes(ev.event_type)) continue
+
+    // Get live score + goal event counts in one query to detect VAR
+    const fixRes = await pool.query(
+      `SELECT
+         f.home_goals, f.away_goals, f.status_short,
+         COALESCE(SUM(CASE WHEN fe.type = 'Goal' THEN 1 ELSE 0 END), 0)::int           AS event_goals,
+         COALESCE(SUM(CASE WHEN fe.type = 'Var'  AND fe.detail ILIKE '%cancel%' THEN 1 ELSE 0 END), 0)::int AS var_cancels
+       FROM fixtures f
+       LEFT JOIN fixture_events fe ON fe.fixture_id = f.id
+       WHERE f.id = $1
+       GROUP BY f.home_goals, f.away_goals, f.status_short`,
+      [ev.fixture_id]
+    )
+    if (!fixRes.rows.length) continue
+    const fx = fixRes.rows[0]
+
+    // Skip finished fixtures — resolveGameweek handles those
+    if (DONE.includes(fx.status_short)) continue
+
+    const h = fx.home_goals ?? 0
+    const a = fx.away_goals ?? 0
+    const total = h + a
+
+    // VAR safety: confirmed goals in event log must match the fixture score.
+    // If they differ a goal was just scored and VAR hasn't concluded yet.
+    const confirmedGoals = fx.event_goals - fx.var_cancels
+    if (confirmedGoals !== total) {
+      varSkipped++
+      continue
+    }
+
+    const { rows: options } = await pool.query(
+      "SELECT id, result_key FROM event_options WHERE event_id = $1 AND result = 'PENDING'",
+      [ev.id]
+    )
+
+    for (const opt of options) {
+      let earlyResult = null
+
+      if (ev.event_type === 'BTTS' && opt.result_key === 'BTTS_YES' && h > 0 && a > 0) {
+        earlyResult = 'WON'
+      }
+      if (ev.event_type === 'GOALS') {
+        const m = opt.result_key?.match(/^OVER_([\d.]+)$/)
+        if (m && total > parseFloat(m[1])) earlyResult = 'WON'
+      }
+
+      if (!earlyResult) continue
+
+      await pool.query("UPDATE event_options SET result = $1 WHERE id = $2", [earlyResult, opt.id])
+      const { rowCount } = await pool.query(
+        "UPDATE user_picks SET pick_status = 'won' WHERE event_option_id = $1 AND pick_status = 'pending'",
+        [opt.id]
+      )
+      settledOptions++
+      settledPicks += rowCount
+    }
+  }
+
+  return ok({ early_settled_options: settledOptions, early_settled_picks: settledPicks, var_skipped: varSkipped, gameweek_id })
+}
+
 function adminNorm(s) {
   return (s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim()
 }
@@ -465,6 +559,6 @@ function adminLastName(s) { const p=s.split(' ').filter(w=>w.length>1); return p
 
 module.exports = {
   importFixtures, createGameweek, getGameweek, updateGameweek, publishGameweek,
-  lockGameweek, unlockGameweek, resolveGameweek,
+  lockGameweek, unlockGameweek, resolveGameweek, earlySettleGameweek,
   adminEvaluateOption, probToEnergyCost,
 }

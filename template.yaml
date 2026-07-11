@@ -294,6 +294,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/users/{id}/energy
             Method: POST
+        DeleteUser:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/users/{id}
+            Method: DELETE
+        ResetUserPassword:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/users/{id}/reset-password
+            Method: POST
         ListLeagues:
           Type: HttpApi
           Properties:
@@ -521,6 +533,12 @@ Resources:
           Properties:
             ApiId: !Ref PrizePicksApi
             Path: /admin/gameweeks/{id}/unlock
+            Method: POST
+        EarlySettleGameweek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/gameweeks/{id}/early-settle
             Method: POST
         ActivateSprint:
           Type: HttpApi
