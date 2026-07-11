@@ -497,9 +497,6 @@ async function runEarlySettlement(pool, gameweek_id) {
     if (!fixRes.rows.length) continue
     const fx = fixRes.rows[0]
 
-    // Skip finished fixtures — resolveGameweek handles those
-    if (DONE.includes(fx.status_short)) continue
-
     const h = fx.home_goals ?? 0
     const a = fx.away_goals ?? 0
     const total = h + a
@@ -645,9 +642,18 @@ async function autoEarlySettleLockedGameweeks(pool) {
        FROM fixtures f
        JOIN events e ON e.fixture_id::bigint = f.id
        JOIN gameweeks g ON g.id = e.gameweek_id
+       LEFT JOIN event_options eo ON eo.event_id = e.id AND eo.result = 'PENDING'
        WHERE g.status = 'LOCKED'
-         AND f.status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
-         AND f.updated_at < NOW() - INTERVAL '3 minutes'`
+         AND (
+           -- Live fixtures stale for 3+ min
+           (f.status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
+            AND f.updated_at < NOW() - INTERVAL '3 minutes')
+           OR
+           -- Recently finished fixtures that still have pending picks
+           (f.status_short IN ('FT','AET','PEN')
+            AND f.updated_at < NOW() - INTERVAL '10 minutes'
+            AND eo.id IS NOT NULL)
+         )`
     )
 
     if (staleFixtures.length > 0) {
