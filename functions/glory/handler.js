@@ -4,6 +4,7 @@ const { getSecrets }       = require("../../shared/ssm")
 const { verifyToken, extractFromEvent } = require("../../shared/auth")
 const { ok, error, unauthorized } = require("../../shared/response")
 const { v4: uuidv4 }       = require("uuid")
+const { autoEarlySettleLockedGameweeks } = require("../admin/gameweeks")
 
 const API_FOOTBALL_BASE    = "https://v3.football.api-sports.io"
 const FINISHED_STATUSES    = ['FT', 'AET', 'PEN', 'AWD', 'WO']
@@ -1789,6 +1790,9 @@ async function getGameweekLive(event, user) {
     fixture_updated_at: e.fixture_updated_at,
     options: optsByEvent[e.event_id] || [],
   }))
+
+  // Fire-and-forget: refresh live scores + settle any certifiable picks
+  autoEarlySettleLockedGameweeks(pool).catch(() => {})
 
   return ok({ events, fetched_at: new Date().toISOString() })
 }
