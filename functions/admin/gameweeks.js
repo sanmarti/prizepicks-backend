@@ -496,8 +496,9 @@ async function earlySettleGameweek(event) {
     const fixRes = await pool.query(
       `SELECT
          f.home_goals, f.away_goals, f.status_short,
-         COALESCE(SUM(CASE WHEN fe.type = 'Goal' THEN 1 ELSE 0 END), 0)::int           AS event_goals,
-         COALESCE(SUM(CASE WHEN fe.type = 'Var'  AND fe.detail ILIKE '%cancel%' THEN 1 ELSE 0 END), 0)::int AS var_cancels
+         COUNT(fe.id)::int                                                                AS total_events,
+         COALESCE(SUM(CASE WHEN fe.type = 'Goal' THEN 1 ELSE 0 END), 0)::int            AS event_goals,
+         COALESCE(SUM(CASE WHEN fe.type = 'Var' AND fe.detail ILIKE '%cancel%' THEN 1 ELSE 0 END), 0)::int AS var_cancels
        FROM fixtures f
        LEFT JOIN fixture_events fe ON fe.fixture_id = f.id
        WHERE f.id = $1
@@ -514,12 +515,15 @@ async function earlySettleGameweek(event) {
     const a = fx.away_goals ?? 0
     const total = h + a
 
-    // VAR safety: confirmed goals in event log must match the fixture score.
-    // If they differ a goal was just scored and VAR hasn't concluded yet.
-    const confirmedGoals = fx.event_goals - fx.var_cancels
-    if (confirmedGoals !== total) {
-      varSkipped++
-      continue
+    // VAR safety: only cross-check if fixture_events has been populated for this game.
+    // Empty events table means detail events weren't fetched yet — not a VAR situation.
+    // If events ARE loaded but goal count disagrees with the score, a review is in progress.
+    if (fx.total_events > 0) {
+      const confirmedGoals = fx.event_goals - fx.var_cancels
+      if (confirmedGoals !== total) {
+        varSkipped++
+        continue
+      }
     }
 
     const { rows: options } = await pool.query(
