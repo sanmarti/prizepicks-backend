@@ -515,52 +515,91 @@ async function runEarlySettlement(pool, gameweek_id) {
       }
     }
 
-    const { rows: options } = await pool.query(
-      "SELECT id, result_key FROM event_options WHERE event_id = $1 AND result = 'PENDING'",
-      [ev.id]
-    )
+    const isFinished = DONE.includes(fx.status_short)
 
-    for (const opt of options) {
-      let earlyResult = null
-
-      if (ev.event_type === 'BTTS') {
-        const bothScored = h > 0 && a > 0
-        if (opt.result_key === 'BTTS_YES' && bothScored) earlyResult = 'WON'
-        if (opt.result_key === 'BTTS_NO'  && bothScored) earlyResult = 'LOST'
-      }
-      if (ev.event_type === 'GOALS') {
-        const m = opt.result_key?.match(/^(OVER|UNDER)_([\d.]+)$/)
-        if (m) {
-          const t = parseFloat(m[2])
-          if (m[1] === 'OVER'  && total > t) earlyResult = 'WON'
-          if (m[1] === 'UNDER' && total > t) earlyResult = 'LOST'
-        }
-      }
-      if (ev.event_type === 'CLEAN_SHEET') {
-        if (opt.result_key === 'HOME_CLEAN_SHEET' && a > 0) earlyResult = 'LOST'
-        if (opt.result_key === 'AWAY_CLEAN_SHEET' && h > 0) earlyResult = 'LOST'
-      }
-
-      if (!earlyResult) continue
-
-      await pool.query("UPDATE event_options SET result = $1 WHERE id = $2", [earlyResult, opt.id])
-      const { rows: updatedPicks } = await pool.query(
-        `UPDATE user_picks SET pick_status = $1
-         WHERE event_option_id = $2 AND pick_status = 'pending'
-         RETURNING entry_id`,
-        [earlyResult === 'WON' ? 'won' : 'lost', opt.id]
+    if (isFinished) {
+      // Finished fixture: full re-evaluation of ALL options to correct any wrong earlier settlement
+      const { rows: options } = await pool.query(
+        "SELECT id, result_key, result AS current_result FROM event_options WHERE event_id = $1",
+        [ev.id]
       )
-      for (const p of updatedPicks) affectedEntries.add(p.entry_id)
-      settledOptions++
-      settledPicks += updatedPicks.length
+      for (const opt of options) {
+        let correctResult = null
+        if (ev.event_type === 'BTTS') {
+          const bothScored = h > 0 && a > 0
+          correctResult = opt.result_key === 'BTTS_YES' ? (bothScored ? 'WON' : 'LOST') : (bothScored ? 'LOST' : 'WON')
+        }
+        if (ev.event_type === 'GOALS') {
+          const m = opt.result_key?.match(/^(OVER|UNDER)_([\d.]+)$/)
+          if (m) {
+            const t = parseFloat(m[2])
+            correctResult = m[1] === 'OVER' ? (total > t ? 'WON' : 'LOST') : (total < t ? 'WON' : 'LOST')
+          }
+        }
+        if (ev.event_type === 'CLEAN_SHEET') {
+          if (opt.result_key === 'HOME_CLEAN_SHEET') correctResult = a === 0 ? 'WON' : 'LOST'
+          if (opt.result_key === 'AWAY_CLEAN_SHEET') correctResult = h === 0 ? 'WON' : 'LOST'
+        }
+        if (!correctResult) continue
+        if (correctResult === opt.current_result) continue  // already correct
+
+        await pool.query("UPDATE event_options SET result = $1 WHERE id = $2", [correctResult, opt.id])
+        const pickStatus = correctResult === 'WON' ? 'won' : 'lost'
+        const { rows: updatedPicks } = await pool.query(
+          `UPDATE user_picks SET pick_status = $1
+           WHERE event_option_id = $2 AND pick_status != $1
+           RETURNING entry_id`,
+          [pickStatus, opt.id]
+        )
+        for (const p of updatedPicks) affectedEntries.add(p.entry_id)
+        settledOptions++
+        settledPicks += updatedPicks.length
+      }
+    } else {
+      // Live fixture: only settle what's mathematically certain (can't go back)
+      const { rows: options } = await pool.query(
+        "SELECT id, result_key FROM event_options WHERE event_id = $1 AND result = 'PENDING'",
+        [ev.id]
+      )
+      for (const opt of options) {
+        let earlyResult = null
+        if (ev.event_type === 'BTTS') {
+          const bothScored = h > 0 && a > 0
+          if (opt.result_key === 'BTTS_YES' && bothScored) earlyResult = 'WON'
+          if (opt.result_key === 'BTTS_NO'  && bothScored) earlyResult = 'LOST'
+        }
+        if (ev.event_type === 'GOALS') {
+          const m = opt.result_key?.match(/^(OVER|UNDER)_([\d.]+)$/)
+          if (m) {
+            const t = parseFloat(m[2])
+            if (m[1] === 'OVER'  && total > t) earlyResult = 'WON'
+            if (m[1] === 'UNDER' && total > t) earlyResult = 'LOST'
+          }
+        }
+        if (ev.event_type === 'CLEAN_SHEET') {
+          if (opt.result_key === 'HOME_CLEAN_SHEET' && a > 0) earlyResult = 'LOST'
+          if (opt.result_key === 'AWAY_CLEAN_SHEET' && h > 0) earlyResult = 'LOST'
+        }
+        if (!earlyResult) continue
+        await pool.query("UPDATE event_options SET result = $1 WHERE id = $2", [earlyResult, opt.id])
+        const { rows: updatedPicks } = await pool.query(
+          `UPDATE user_picks SET pick_status = $1
+           WHERE event_option_id = $2 AND pick_status = 'pending'
+           RETURNING entry_id`,
+          [earlyResult === 'WON' ? 'won' : 'lost', opt.id]
+        )
+        for (const p of updatedPicks) affectedEntries.add(p.entry_id)
+        settledOptions++
+        settledPicks += updatedPicks.length
+      }
     }
   }
 
-  // Award LP for affected entries where all picks are now resolved
+  // Award / correct LP for affected entries
   let lpAwarded = 0
   for (const entryId of affectedEntries) {
     const entryRes = await pool.query(
-      "SELECT * FROM user_gameweek_entries WHERE id = $1 AND status NOT IN ('completed','void')",
+      "SELECT * FROM user_gameweek_entries WHERE id = $1 AND status != 'void'",
       [entryId]
     )
     if (!entryRes.rows.length) continue
@@ -578,36 +617,57 @@ async function runEarlySettlement(pool, gameweek_id) {
     const incorrect  = allPicks.filter(p => p.result === 'LOST').length
 
     if (hasPending) {
-      // Partial — just update the running count for display, don't award LP yet
+      // Partial — update running counts only
       await pool.query(
         "UPDATE user_gameweek_entries SET correct_picks = $1, incorrect_picks = $2 WHERE id = $3",
         [correct, incorrect, entryId]
       )
     } else {
-      // All picks resolved — fully settle and award LP now
-      const isPerfect = correct === 6
-      const bonus     = isPerfect ? 4 : 0
-      const lp        = correct + bonus
+      const isPerfect  = correct === 6
+      const bonus      = isPerfect ? 4 : 0
+      const lp         = correct + bonus
+      const wasSettled = entry.status === 'completed'
+      const oldLp      = entry.league_points ?? 0
+      const oldCorrect = entry.correct_picks ?? 0
+      const oldIncorrect = entry.incorrect_picks ?? 0
+      const lpDelta    = lp - oldLp
+      const correctDelta   = correct - oldCorrect
+      const incorrectDelta = incorrect - oldIncorrect
 
       await pool.query(
         `UPDATE user_gameweek_entries SET
            status='completed', correct_picks=$1, incorrect_picks=$2,
-           league_points=$3, perfect_week_bonus=$4, is_perfect_week=$5, settled_at=NOW()
+           league_points=$3, perfect_week_bonus=$4, is_perfect_week=$5, settled_at=COALESCE(settled_at, NOW())
          WHERE id=$6`,
         [correct, incorrect, lp, bonus, isPerfect, entryId]
       )
 
       if (entry.sprint_id) {
-        await pool.query(
-          `UPDATE user_sprint_progress SET
-             total_correct_picks    = total_correct_picks + $1,
-             total_incorrect_picks  = total_incorrect_picks + $2,
-             total_league_points    = total_league_points + $3,
-             perfect_weeks          = perfect_weeks + $4,
-             gameweeks_participated = gameweeks_participated + 1
-           WHERE user_id = $5 AND sprint_id = $6`,
-          [correct, incorrect, lp, isPerfect ? 1 : 0, entry.user_id, entry.sprint_id]
-        )
+        if (wasSettled) {
+          // Already counted — apply delta only to avoid double-counting
+          if (lpDelta !== 0 || correctDelta !== 0 || incorrectDelta !== 0) {
+            await pool.query(
+              `UPDATE user_sprint_progress SET
+                 total_correct_picks   = total_correct_picks + $1,
+                 total_incorrect_picks = total_incorrect_picks + $2,
+                 total_league_points   = total_league_points + $3
+               WHERE user_id = $4 AND sprint_id = $5`,
+              [correctDelta, incorrectDelta, lpDelta, entry.user_id, entry.sprint_id]
+            )
+          }
+        } else {
+          // First time completing this entry
+          await pool.query(
+            `UPDATE user_sprint_progress SET
+               total_correct_picks    = total_correct_picks + $1,
+               total_incorrect_picks  = total_incorrect_picks + $2,
+               total_league_points    = total_league_points + $3,
+               perfect_weeks          = perfect_weeks + $4,
+               gameweeks_participated = gameweeks_participated + 1
+             WHERE user_id = $5 AND sprint_id = $6`,
+            [correct, incorrect, lp, isPerfect ? 1 : 0, entry.user_id, entry.sprint_id]
+          )
+        }
       }
 
       if (isPerfect) {
