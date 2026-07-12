@@ -431,17 +431,20 @@ function adminEvaluateOption(rk, label, eventType, fixture, cornerTotal, scorers
     if (rk === 'DRAW'      || lb === 'draw')       return hFt === aFt ? 'WON' : 'LOST'
   }
   if (eventType === 'GOALS') {
-    const total = h + a, m = rk.match(/^(OVER|UNDER)_([\d.]+)$/)
+    // Always count full-match goals including extra time — ET goals count for over/under
+    const total = hTotal + aTotal, m = rk.match(/^(OVER|UNDER)_([\d.]+)$/)
     if (m) { const t = parseFloat(m[2]); return m[1]==='OVER' ? (total>t?'WON':'LOST') : (total<t?'WON':'LOST') }
   }
   if (eventType === 'BTTS') {
-    const both = h > 0 && a > 0
+    // ET goals count — use full totals
+    const both = hTotal > 0 && aTotal > 0
     if (rk === 'BTTS_YES') return both ? 'WON' : 'LOST'
     if (rk === 'BTTS_NO')  return both ? 'LOST' : 'WON'
   }
   if (eventType === 'CLEAN_SHEET') {
-    if (rk === 'HOME_CLEAN_SHEET') return a === 0 ? 'WON' : 'LOST'
-    if (rk === 'AWAY_CLEAN_SHEET') return h === 0 ? 'WON' : 'LOST'
+    // ET goals count against clean sheet — use full totals
+    if (rk === 'HOME_CLEAN_SHEET') return aTotal === 0 ? 'WON' : 'LOST'
+    if (rk === 'AWAY_CLEAN_SHEET') return hTotal === 0 ? 'WON' : 'LOST'
   }
   if (eventType === 'CORNER_OVER') {
     const total = cornerTotal ?? 0, m = rk.match(/^CORNER_(OVER|UNDER)_([\d.]+)$/)
