@@ -34,7 +34,7 @@ async function listUsers() {
        WHERE uds.user_id = u.id LIMIT 1)                                               AS current_division,
       (SELECT utp.temp_password FROM user_temp_passwords utp
        WHERE utp.user_id = u.id LIMIT 1)                                               AS temp_password,
-      (SELECT uge.picks_submitted
+      (SELECT uge.picks_submitted > 0
        FROM user_gameweek_entries uge
        WHERE uge.user_id = u.id
          AND uge.gameweek_id = (
