@@ -811,7 +811,7 @@ async function getPublicScores(event) {
             await upsertFixtures(pool, rows)
             console.log(`[scores] auto-refreshed ${rows.length}/${apiFixtures.length} fixtures for ${date}`)
             // Scores updated — run early settlement for any locked gameweeks
-            autoEarlySettleLockedGameweeks(pool)
+            await autoEarlySettleLockedGameweeks(pool).catch(() => {})
           }
         }
       }

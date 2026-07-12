@@ -1791,8 +1791,8 @@ async function getGameweekLive(event, user) {
     options: optsByEvent[e.event_id] || [],
   }))
 
-  // Fire-and-forget: refresh live scores + settle any certifiable picks
-  autoEarlySettleLockedGameweeks(pool).catch(() => {})
+  // Run settlement synchronously — Lambda freezes on return so fire-and-forget doesn't work
+  await autoEarlySettleLockedGameweeks(pool).catch(() => {})
 
   return ok({ events, fetched_at: new Date().toISOString() })
 }
