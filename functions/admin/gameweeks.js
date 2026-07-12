@@ -504,18 +504,17 @@ async function runEarlySettlement(pool, gameweek_id) {
     const a = fx.away_goals ?? 0
     const total = h + a
 
-    // VAR safety: only cross-check if fixture_events has been populated for this game.
-    // Empty events table means detail events weren't fetched yet — not a VAR situation.
-    // If events ARE loaded but goal count disagrees with the score, a review is in progress.
-    if (fx.total_events > 0) {
+    const isFinished = DONE.includes(fx.status_short)
+
+    // VAR safety: only needed for live games — finished games have a final score.
+    // Only cross-check if fixture_events has been populated (empty = events not fetched yet).
+    if (!isFinished && fx.total_events > 0) {
       const confirmedGoals = fx.event_goals - fx.var_cancels
       if (confirmedGoals !== total) {
         varSkipped++
         continue
       }
     }
-
-    const isFinished = DONE.includes(fx.status_short)
 
     if (isFinished) {
       // Finished fixture: full re-evaluation of ALL options to correct any wrong earlier settlement
