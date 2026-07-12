@@ -382,14 +382,6 @@ async function getDashboard(event) {
       WHERE up.created_at >= NOW() - INTERVAL '${interval}'
       GROUP BY day ORDER BY day ASC`),
 
-    // Daily active users by day — distinct users who made picks (real users only)
-    pool.query(`
-      SELECT DATE(up.created_at) AS day, COUNT(DISTINCT up.user_id)::int AS dau
-      FROM user_picks up
-      JOIN users u ON u.id = up.user_id AND u.role = 'user'
-      WHERE up.created_at >= NOW() - INTERVAL '${interval}'
-      GROUP BY day ORDER BY day ASC`),
-
     // Pack sales breakdown (real users only)
     pool.query(`
       SELECT p.pack_name AS name,
@@ -438,6 +430,14 @@ async function getDashboard(event) {
       GROUP BY s.id, s.name, s.status, s.start_date, s.end_date
       ORDER BY s.start_date ASC
       LIMIT 1`),
+
+    // Daily active users by day — distinct users who made picks (real users only)
+    pool.query(`
+      SELECT DATE(up.created_at) AS day, COUNT(DISTINCT up.user_id)::int AS dau
+      FROM user_picks up
+      JOIN users u ON u.id = up.user_id AND u.role = 'user'
+      WHERE up.created_at >= NOW() - INTERVAL '${interval}'
+      GROUP BY day ORDER BY day ASC`),
   ])
 
   const total       = usersTotal.rows[0].count
