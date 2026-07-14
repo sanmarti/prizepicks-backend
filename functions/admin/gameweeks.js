@@ -4,6 +4,7 @@ const { getPool } = require('../../shared/db')
 const { getSecrets } = require('../../shared/ssm')
 const { ok, error } = require('../../shared/response')
 const { awardBadgeAdmin } = require('./sprints')
+const { sendEmail, picksOpenEmail, lockReminderEmail } = require('../../shared/email')
 
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
@@ -206,6 +207,28 @@ async function publishGameweek(event) {
         [uuidv4(), gameweek_id, rotated[i], rotated[n - 1 - i]]
       )
       totalMatchups++
+    }
+  }
+
+  // Send "picks are open" emails to all opted-in users
+  const gwMeta = await pool.query(
+    `SELECT g.sprint_week, g.lock_time, s.name AS sprint_name
+     FROM gameweeks g JOIN sprints s ON s.id = g.sprint_id
+     WHERE g.id = $1`, [gameweek_id]
+  )
+  if (gwMeta.rows.length) {
+    const { sprint_week, lock_time, sprint_name } = gwMeta.rows[0]
+    const users = await pool.query(
+      `SELECT email, display_name FROM users WHERE role = 'user' AND notifications_enabled = TRUE`
+    )
+    for (const u of users.rows) {
+      const { subject, html } = picksOpenEmail({
+        displayName: u.display_name || u.email.split('@')[0],
+        sprintName:  sprint_name,
+        weekNumber:  sprint_week,
+        lockTime:    lock_time,
+      })
+      await sendEmail(u.email, subject, html)
     }
   }
 

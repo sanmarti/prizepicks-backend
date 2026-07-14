@@ -1,6 +1,7 @@
 const axios = require("axios")
 const { getPool } = require("../../shared/db")
 const { getSecrets } = require("../../shared/ssm")
+const { sendEmail, lockReminderEmail } = require("../../shared/email")
 
 const FINISHED_STATUSES = ['FT', 'AET', 'PEN', 'AWD', 'WO']
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
@@ -39,6 +40,7 @@ exports.handler = async () => {
     log.sprintSettled   = await autoSettleClosedSprints(pool)
     log.activated       = await autoActivateSprints(pool)
     log.divisionSync    = await syncProgressDivisions(pool)
+    log.lockReminders   = await sendLockReminders(pool)
   } catch (err) {
     console.error("Lifecycle error:", err)
     log.error = err.message
@@ -677,6 +679,59 @@ async function settleBadgesLifecycle(pool, userId, outcome, newDivId, divById, s
       if (newDiv.is_highest)         await awardBadgeLifecycle(pool, userId, 'REACHED_CHAMPIONS', sprintId, null)
     }
   }
+}
+
+// Send lock-reminder emails to users who haven't submitted picks, 1 hour before gameweek locks
+async function sendLockReminders(pool) {
+  const { rows: gameweeks } = await pool.query(
+    `SELECT g.id, g.lock_time, g.sprint_week,
+            s.name AS sprint_name
+     FROM gameweeks g
+     JOIN sprints s ON s.id = g.sprint_id
+     WHERE g.status = 'PUBLISHED'
+       AND g.lock_reminder_sent = FALSE
+       AND g.lock_time BETWEEN NOW() AND NOW() + INTERVAL '1 hour'`
+  )
+  if (gameweeks.length === 0) return 0
+
+  let sent = 0
+  for (const gw of gameweeks) {
+    try {
+      // Users who have NOT submitted picks for this gameweek
+      const { rows: users } = await pool.query(
+        `SELECT u.email, u.display_name
+         FROM users u
+         WHERE u.role = 'user' AND u.notifications_enabled = TRUE
+           AND NOT EXISTS (
+             SELECT 1 FROM user_gameweek_entries uge
+             WHERE uge.user_id = u.id
+               AND uge.gameweek_id = $1
+               AND uge.picks_submitted > 0
+           )`,
+        [gw.id]
+      )
+
+      for (const u of users) {
+        const { subject, html } = lockReminderEmail({
+          displayName: u.display_name || u.email.split('@')[0],
+          sprintName: gw.sprint_name,
+          weekNumber: gw.sprint_week,
+          lockTime: gw.lock_time,
+          hasPicks: false,
+        })
+        await sendEmail(u.email, subject, html)
+        sent++
+      }
+
+      await pool.query(
+        `UPDATE gameweeks SET lock_reminder_sent = TRUE WHERE id = $1`,
+        [gw.id]
+      )
+    } catch (e) {
+      console.error(`[lockReminders] failed for gameweek ${gw.id}:`, e.message)
+    }
+  }
+  return sent
 }
 
 async function syncProgressDivisions(pool) {

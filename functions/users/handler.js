@@ -29,6 +29,7 @@ async function getProfile(event) {
   const pool = await getPool()
   const { rows } = await pool.query(
     `SELECT u.id, u.email, u.display_name, u.avatar_url, u.role, u.created_at,
+            u.notifications_enabled,
             COALESCE(w.balance, 0) AS energy_balance,
             COALESCE(s.wins, 0)   AS wins,
             COALESCE(s.losses, 0) AS losses,
@@ -54,10 +55,13 @@ async function updateProfile(event) {
   if (!me) return unauthorized()
 
   const body = JSON.parse(event.body || '{}')
-  const { display_name, avatar_url } = body
+  const { display_name, avatar_url, notifications_enabled } = body
 
   if (display_name !== undefined && (typeof display_name !== 'string' || display_name.trim().length < 2)) {
     return error(400, 'Display name must be at least 2 characters')
+  }
+  if (notifications_enabled !== undefined && typeof notifications_enabled !== 'boolean') {
+    return error(400, 'notifications_enabled must be a boolean')
   }
 
   // avatar_url is a base64 data URL compressed client-side — cap at 250 KB
@@ -72,15 +76,16 @@ async function updateProfile(event) {
   const vals   = []
   let idx = 1
 
-  if (display_name !== undefined) { fields.push(`display_name = $${idx++}`); vals.push(display_name.trim()) }
-  if (avatar_url   !== undefined) { fields.push(`avatar_url = $${idx++}`);   vals.push(avatar_url) }
+  if (display_name           !== undefined) { fields.push(`display_name = $${idx++}`);           vals.push(display_name.trim()) }
+  if (avatar_url             !== undefined) { fields.push(`avatar_url = $${idx++}`);             vals.push(avatar_url) }
+  if (notifications_enabled !== undefined) { fields.push(`notifications_enabled = $${idx++}`); vals.push(notifications_enabled) }
 
   if (!fields.length) return error(400, 'Nothing to update')
 
   vals.push(me.userId)
   const { rows } = await pool.query(
     `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx}
-     RETURNING id, email, display_name, avatar_url, role`,
+     RETURNING id, email, display_name, avatar_url, role, notifications_enabled`,
     vals
   )
   return ok({ user: rows[0] })
@@ -105,5 +110,6 @@ async function changePassword(event) {
 
   const hash = await bcrypt.hash(new_password, 10)
   await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, me.userId])
+  await pool.query('DELETE FROM user_temp_passwords WHERE user_id = $1', [me.userId]).catch(() => {})
   return ok({ message: 'Password updated' })
 }
