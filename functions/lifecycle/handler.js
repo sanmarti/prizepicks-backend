@@ -354,6 +354,7 @@ async function autoSettleFinishedEvents(pool) {
      WHERE g.status = 'LOCKED'
        AND e.fixture_id IS NOT NULL
        AND f.status_short IN ('FT','AET','PEN','AWD','WO')
+       AND f.updated_at < NOW() - INTERVAL '3 minutes'
        AND EXISTS (
          SELECT 1 FROM event_options eo
          WHERE eo.event_id = e.id AND (eo.result IS NULL OR eo.result = 'PENDING')
