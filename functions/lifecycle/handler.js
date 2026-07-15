@@ -285,13 +285,18 @@ async function autoResolveGameweeks(pool) {
   let count = 0
   for (const { id: gwId } of locked) {
     try {
-      // Check for any non-finished fixtures linked to this gameweek
+      // Count fixtures that are either not finished OR changed within the last 3 minutes.
+      // The 3-minute guard prevents resolving when a fixture briefly shows FT mid-match
+      // (e.g. between 90 min and extra time), which would permanently mis-settle picks.
       const { rows: pending } = await pool.query(
         `SELECT COUNT(*)::int AS cnt
          FROM events e
          JOIN fixtures f ON e.fixture_id IS NOT NULL AND f.id = e.fixture_id::BIGINT
          WHERE e.gameweek_id = $1
-           AND f.status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')`,
+           AND (
+             f.status_short NOT IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD')
+             OR f.updated_at >= NOW() - INTERVAL '3 minutes'
+           )`,
         [gwId]
       )
       if (pending[0].cnt > 0) continue
