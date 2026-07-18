@@ -696,7 +696,7 @@ async function sendLockReminders(pool) {
      JOIN sprints s ON s.id = g.sprint_id
      WHERE g.status = 'PUBLISHED'
        AND g.lock_reminder_sent = FALSE
-       AND g.lock_time BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'`
+       AND g.lock_time BETWEEN NOW() + INTERVAL '55 minutes' AND NOW() + INTERVAL '65 minutes'`
   )
   if (gameweeks.length === 0) return 0
 
