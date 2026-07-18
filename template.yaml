@@ -13,6 +13,7 @@ Globals:
       Variables:
         NODE_ENV: production
         AWS_ACCOUNT_REGION: eu-west-3
+        RESEND_API_KEY: re_dVjYEv1u_8AjLTt8ioH8xECtAB5LGAwVw
     # Each function ships the whole repo root so ../../shared/* resolves correctly
     CodeUri: ./
 
