@@ -14,6 +14,41 @@ async function sendEmail(to, subject, html) {
   }
 }
 
+const API_BASE = 'https://uglbx8p4l4.execute-api.eu-west-3.amazonaws.com/prod'
+
+async function createEmailLog(pool, { userId, type, subject }) {
+  const id = require('crypto').randomUUID()
+  try {
+    await pool.query(
+      `INSERT INTO email_logs (id, user_id, type, subject) VALUES ($1, $2, $3, $4)`,
+      [id, userId, type, subject]
+    )
+    return id
+  } catch (err) {
+    console.error('[email] failed to create log:', err.message)
+    return null
+  }
+}
+
+async function updateEmailLogResendId(pool, logId, resendId) {
+  if (!logId) return
+  try {
+    await pool.query(`UPDATE email_logs SET resend_id = $1 WHERE id = $2`, [resendId, logId])
+  } catch (err) {
+    console.error('[email] failed to update resend_id:', err.message)
+  }
+}
+
+function injectTracking(html, logId) {
+  if (!logId) return html
+  const pixel = `<img src="${API_BASE}/t/o/${logId}" width="1" height="1" style="display:none" alt=""/>`
+  const tracked = html.replace(
+    /href="(https?:\/\/[^"]+)"/g,
+    (_, url) => `href="${API_BASE}/t/c/${logId}?url=${encodeURIComponent(url)}"`
+  )
+  return tracked.replace('</body>', `${pixel}</body>`)
+}
+
 async function logEmail(pool, { userId, resendId, type, subject }) {
   try {
     await pool.query(
@@ -193,6 +228,9 @@ function sprintEndEmail({ displayName, sprintName, outcome, divisionName, nextDi
 module.exports = {
   sendEmail,
   logEmail,
+  createEmailLog,
+  updateEmailLogResendId,
+  injectTracking,
   picksOpenEmail,
   lockReminderEmail,
   resultsEmail,

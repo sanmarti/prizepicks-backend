@@ -1,7 +1,7 @@
 const axios = require("axios")
 const { getPool } = require("../../shared/db")
 const { getSecrets } = require("../../shared/ssm")
-const { sendEmail, logEmail, lockReminderEmail } = require("../../shared/email")
+const { sendEmail, createEmailLog, updateEmailLogResendId, injectTracking, lockReminderEmail } = require("../../shared/email")
 
 const FINISHED_STATUSES = ['FT', 'AET', 'PEN', 'AWD', 'WO']
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
@@ -725,8 +725,9 @@ async function sendLockReminders(pool) {
           lockTime: gw.lock_time,
           hasPicks: false,
         })
-        const resendId = await sendEmail(u.email, subject, html)
-        await logEmail(pool, { userId: u.id, resendId, type: 'lock_reminder', subject })
+        const logId = await createEmailLog(pool, { userId: u.id, type: 'lock_reminder', subject })
+        const resendId = await sendEmail(u.email, subject, injectTracking(html, logId))
+        await updateEmailLogResendId(pool, logId, resendId)
         sent++
       }
 

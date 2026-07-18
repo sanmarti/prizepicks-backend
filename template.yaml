@@ -325,6 +325,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/communications/detail
             Method: GET
+        TrackOpen:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /t/o/{id}
+            Method: GET
+        TrackClick:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /t/c/{id}
+            Method: GET
         ResendWebhook:
           Type: HttpApi
           Properties:

@@ -11,6 +11,38 @@ const { debugDivisions, updateEvent, resettleEvent, fixBrokenWhoQualifies, fixDi
 exports.handler = async (event) => {
   const routeKey = event.routeKey
 
+  // Open tracking pixel — no auth
+  if (routeKey === "GET /t/o/{id}") {
+    const id = event.pathParameters?.id
+    if (id) {
+      try {
+        const { getPool } = require('../../shared/db')
+        const pool = await getPool()
+        await pool.query(`UPDATE email_logs SET opened_at = NOW() WHERE id = $1 AND opened_at IS NULL`, [id])
+      } catch (e) { console.error('[track/open]', e.message) }
+    }
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'image/gif', 'Cache-Control': 'no-store, no-cache' },
+      body: 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+      isBase64Encoded: true,
+    }
+  }
+
+  // Click tracking redirect — no auth
+  if (routeKey === "GET /t/c/{id}") {
+    const id = event.pathParameters?.id
+    const url = event.queryStringParameters?.url || 'https://oddsrivals.com'
+    if (id) {
+      try {
+        const { getPool } = require('../../shared/db')
+        const pool = await getPool()
+        await pool.query(`UPDATE email_logs SET clicked_at = NOW() WHERE id = $1 AND clicked_at IS NULL`, [id])
+      } catch (e) { console.error('[track/click]', e.message) }
+    }
+    return { statusCode: 302, headers: { Location: url }, body: '' }
+  }
+
   // Resend webhook — no auth, verified by checking event type
   if (routeKey === "POST /webhooks/resend") {
     try {

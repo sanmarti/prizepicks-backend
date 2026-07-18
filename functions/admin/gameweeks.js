@@ -4,7 +4,7 @@ const { getPool } = require('../../shared/db')
 const { getSecrets } = require('../../shared/ssm')
 const { ok, error } = require('../../shared/response')
 const { awardBadgeAdmin } = require('./sprints')
-const { sendEmail, logEmail, picksOpenEmail, lockReminderEmail } = require('../../shared/email')
+const { sendEmail, createEmailLog, updateEmailLogResendId, injectTracking, picksOpenEmail, lockReminderEmail } = require('../../shared/email')
 
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
@@ -228,8 +228,9 @@ async function publishGameweek(event) {
         weekNumber:  sprint_week,
         lockTime:    lock_time,
       })
-      const resendId = await sendEmail(u.email, subject, html)
-      await logEmail(pool, { userId: u.id, resendId, type: 'picks_open', subject })
+      const logId = await createEmailLog(pool, { userId: u.id, type: 'picks_open', subject })
+      const resendId = await sendEmail(u.email, subject, injectTracking(html, logId))
+      await updateEmailLogResendId(pool, logId, resendId)
     }
   }
 
