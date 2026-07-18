@@ -42,11 +42,7 @@ async function updateEmailLogResendId(pool, logId, resendId) {
 function injectTracking(html, logId) {
   if (!logId) return html
   const pixel = `<img src="${API_BASE}/t/o/${logId}" width="1" height="1" style="display:none" alt=""/>`
-  const tracked = html.replace(
-    /href="(https?:\/\/[^"]+)"/g,
-    (_, url) => `href="${API_BASE}/t/c/${logId}?url=${encodeURIComponent(url)}"`
-  )
-  return tracked.replace('</body>', `${pixel}</body>`)
+  return html.replace('</body>', `${pixel}</body>`)
 }
 
 async function logEmail(pool, { userId, resendId, type, subject }) {
