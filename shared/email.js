@@ -1,18 +1,12 @@
-const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses')
+const { Resend } = require('resend')
 
-const ses = new SESClient({ region: 'eu-west-3' })
+const resend = new Resend(process.env.RESEND_API_KEY)
 const FROM = 'OddsRivals <noreply@oddsrivals.com>'
 
 async function sendEmail(to, subject, html) {
   try {
-    await ses.send(new SendEmailCommand({
-      Source: FROM,
-      Destination: { ToAddresses: [to] },
-      Message: {
-        Subject: { Data: subject, Charset: 'UTF-8' },
-        Body: { Html: { Data: html, Charset: 'UTF-8' } },
-      },
-    }))
+    const { error } = await resend.emails.send({ from: FROM, to: [to], subject, html })
+    if (error) console.error('[email] resend error sending to', to, error.message)
   } catch (err) {
     console.error('[email] failed to send to', to, err.message)
   }

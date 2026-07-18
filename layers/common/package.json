@@ -9,6 +9,6 @@
     "stripe": "^14.21.0",
     "uuid": "^9.0.1",
     "@aws-sdk/client-ssm": "^3.600.0",
-    "@aws-sdk/client-ses": "^3.600.0"
+    "resend": "^4.0.0"
   }
 }
