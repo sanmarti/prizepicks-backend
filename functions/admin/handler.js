@@ -1,7 +1,7 @@
 const { verifyToken, extractFromEvent } = require('../../shared/auth')
 const { error, unauthorized } = require('../../shared/response')
 
-const { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword } = require('./users')
+const { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications } = require('./users')
 const { importFixtures, createGameweek, getGameweek, updateGameweek, publishGameweek, lockGameweek, unlockGameweek, resolveGameweek, earlySettleGameweek } = require('./gameweeks')
 const { getOddsForFixture, listCompetitions, createCompetition, updateCompetition, deleteCompetition, getCompetitionCalendar, getCompetitionStandings, getFixtureDetails, getCompetitionGameweeks, getAvailableFixtures, importFixturesByRange, browseCompetitions, importCompetitionFromApi, refreshFixtureResults, getPublicScores, getPublicGameweek } = require('./competitions')
 const { listDivisions, createDivision, updateDivision, getDivisionUsers, listSprints, createSprint, getSprint, updateSprint, activateSprint, addSprintGameweek, removeSprintGameweek, updateSprintGameweekDates, settleSprint, getRankings, recalculateSprintEntries } = require('./sprints')
@@ -10,6 +10,27 @@ const { debugDivisions, updateEvent, resettleEvent, fixBrokenWhoQualifies, fixDi
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
+
+  // Resend webhook — no auth, verified by checking event type
+  if (routeKey === "POST /webhooks/resend") {
+    try {
+      const body = JSON.parse(event.body || '{}')
+      const { type, data } = body
+      if (data?.email_id && (type === 'email.opened' || type === 'email.clicked')) {
+        const { getPool } = require('../../shared/db')
+        const pool = await getPool()
+        const field = type === 'email.opened' ? 'opened_at' : 'clicked_at'
+        await pool.query(
+          `UPDATE email_logs SET ${field} = NOW() WHERE resend_id = $1 AND ${field} IS NULL`,
+          [data.email_id]
+        )
+      }
+      return { statusCode: 200, body: 'ok' }
+    } catch (err) {
+      console.error('[webhook/resend]', err)
+      return { statusCode: 200, body: 'ok' }
+    }
+  }
 
   // Public routes — no auth required
   if (routeKey === "GET /competitions") {
@@ -47,8 +68,9 @@ exports.handler = async (event) => {
     if (routeKey === "GET /admin/users")              return await listUsers()
     if (routeKey === "GET /admin/users/{id}")         return await getUserDetail(event)
     if (routeKey === "POST /admin/users/{id}/energy") return await adjustUserEnergy(event)
-    if (routeKey === "DELETE /admin/users/{id}")              return await deleteUser(event)
-    if (routeKey === "POST /admin/users/{id}/reset-password") return await resetUserPassword(event)
+    if (routeKey === "DELETE /admin/users/{id}")                    return await deleteUser(event)
+    if (routeKey === "POST /admin/users/{id}/reset-password")       return await resetUserPassword(event)
+    if (routeKey === "GET /admin/users/{id}/notifications")         return await getUserNotifications(event)
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
     if (routeKey === "GET /admin/dashboard")        return await getDashboard(event)

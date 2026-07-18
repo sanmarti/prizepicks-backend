@@ -538,4 +538,16 @@ async function deleteUser(event) {
   return ok({ deleted: true, email: check.rows[0].email })
 }
 
-module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword }
+async function getUserNotifications(event) {
+  const id = event.pathParameters?.id
+  if (!id) return error(400, 'Missing user id')
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT id, resend_id, type, subject, sent_at, opened_at, clicked_at
+     FROM email_logs WHERE user_id = $1 ORDER BY sent_at DESC LIMIT 100`,
+    [id]
+  )
+  return ok({ notifications: rows })
+}
+
+module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications }

@@ -1,7 +1,7 @@
 const axios = require("axios")
 const { getPool } = require("../../shared/db")
 const { getSecrets } = require("../../shared/ssm")
-const { sendEmail, lockReminderEmail } = require("../../shared/email")
+const { sendEmail, logEmail, lockReminderEmail } = require("../../shared/email")
 
 const FINISHED_STATUSES = ['FT', 'AET', 'PEN', 'AWD', 'WO']
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
@@ -705,7 +705,7 @@ async function sendLockReminders(pool) {
     try {
       // Users who have NOT submitted picks for this gameweek
       const { rows: users } = await pool.query(
-        `SELECT u.email, u.display_name
+        `SELECT u.id, u.email, u.display_name
          FROM users u
          WHERE u.role = 'user' AND u.notifications_enabled = TRUE
            AND NOT EXISTS (
@@ -725,7 +725,8 @@ async function sendLockReminders(pool) {
           lockTime: gw.lock_time,
           hasPicks: false,
         })
-        await sendEmail(u.email, subject, html)
+        const resendId = await sendEmail(u.email, subject, html)
+        await logEmail(pool, { userId: u.id, resendId, type: 'lock_reminder', subject })
         sent++
       }
 

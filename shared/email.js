@@ -5,10 +5,23 @@ const FROM = 'OddsRivals <noreply@oddsrivals.com>'
 
 async function sendEmail(to, subject, html) {
   try {
-    const { error } = await resend.emails.send({ from: FROM, to: [to], subject, html })
-    if (error) console.error('[email] resend error sending to', to, error.message)
+    const { data, error } = await resend.emails.send({ from: FROM, to: [to], subject, html })
+    if (error) { console.error('[email] resend error sending to', to, error.message); return null }
+    return data?.id ?? null
   } catch (err) {
     console.error('[email] failed to send to', to, err.message)
+    return null
+  }
+}
+
+async function logEmail(pool, { userId, resendId, type, subject }) {
+  try {
+    await pool.query(
+      `INSERT INTO email_logs (user_id, resend_id, type, subject) VALUES ($1, $2, $3, $4)`,
+      [userId, resendId, type, subject]
+    )
+  } catch (err) {
+    console.error('[email] failed to log email:', err.message)
   }
 }
 
@@ -179,6 +192,7 @@ function sprintEndEmail({ displayName, sprintName, outcome, divisionName, nextDi
 
 module.exports = {
   sendEmail,
+  logEmail,
   picksOpenEmail,
   lockReminderEmail,
   resultsEmail,
