@@ -13,7 +13,7 @@ Globals:
       Variables:
         NODE_ENV: production
         AWS_ACCOUNT_REGION: eu-west-3
-        RESEND_API_KEY: '{{resolve:ssm:/prizepicks/resend_api_key}}'
+        RESEND_API_KEY: '{{resolve:ssm-secure:/prizepicks/resend_api_key}}'
     # Each function ships the whole repo root so ../../shared/* resolves correctly
     CodeUri: ./
 
