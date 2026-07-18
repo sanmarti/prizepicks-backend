@@ -1,7 +1,7 @@
 const { verifyToken, extractFromEvent } = require('../../shared/auth')
 const { error, unauthorized } = require('../../shared/response')
 
-const { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications } = require('./users')
+const { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications, listCommunications, getCommunicationDetail } = require('./users')
 const { importFixtures, createGameweek, getGameweek, updateGameweek, publishGameweek, lockGameweek, unlockGameweek, resolveGameweek, earlySettleGameweek } = require('./gameweeks')
 const { getOddsForFixture, listCompetitions, createCompetition, updateCompetition, deleteCompetition, getCompetitionCalendar, getCompetitionStandings, getFixtureDetails, getCompetitionGameweeks, getAvailableFixtures, importFixturesByRange, browseCompetitions, importCompetitionFromApi, refreshFixtureResults, getPublicScores, getPublicGameweek } = require('./competitions')
 const { listDivisions, createDivision, updateDivision, getDivisionUsers, listSprints, createSprint, getSprint, updateSprint, activateSprint, addSprintGameweek, removeSprintGameweek, updateSprintGameweekDates, settleSprint, getRankings, recalculateSprintEntries } = require('./sprints')
@@ -71,6 +71,8 @@ exports.handler = async (event) => {
     if (routeKey === "DELETE /admin/users/{id}")                    return await deleteUser(event)
     if (routeKey === "POST /admin/users/{id}/reset-password")       return await resetUserPassword(event)
     if (routeKey === "GET /admin/users/{id}/notifications")         return await getUserNotifications(event)
+    if (routeKey === "GET /admin/communications")                   return await listCommunications()
+    if (routeKey === "GET /admin/communications/detail")            return await getCommunicationDetail(event)
     if (routeKey === "GET /admin/leagues")          return await listLeagues()
     if (routeKey === "GET /admin/stats")            return await getStats()
     if (routeKey === "GET /admin/dashboard")        return await getDashboard(event)

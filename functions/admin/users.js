@@ -550,4 +550,42 @@ async function getUserNotifications(event) {
   return ok({ notifications: rows })
 }
 
-module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications }
+async function listCommunications() {
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT
+       type,
+       subject,
+       DATE_TRUNC('hour', sent_at) AS sent_at,
+       COUNT(*)::int                                          AS total_sent,
+       COUNT(opened_at)::int                                 AS opened,
+       COUNT(clicked_at)::int                                AS clicked,
+       ROUND(COUNT(opened_at)  * 100.0 / NULLIF(COUNT(*),0), 1) AS open_rate,
+       ROUND(COUNT(clicked_at) * 100.0 / NULLIF(COUNT(*),0), 1) AS click_rate
+     FROM email_logs
+     GROUP BY type, subject, DATE_TRUNC('hour', sent_at)
+     ORDER BY DATE_TRUNC('hour', sent_at) DESC`
+  )
+  return ok({ communications: rows })
+}
+
+async function getCommunicationDetail(event) {
+  const { subject, sent_at } = event.queryStringParameters || {}
+  if (!subject || !sent_at) return error(400, 'Missing subject or sent_at')
+  const pool = await getPool()
+  const { rows } = await pool.query(
+    `SELECT
+       el.id, el.resend_id, el.subject, el.type,
+       el.sent_at, el.opened_at, el.clicked_at,
+       u.email, u.display_name
+     FROM email_logs el
+     JOIN users u ON u.id = el.user_id
+     WHERE el.subject = $1
+       AND DATE_TRUNC('hour', el.sent_at) = DATE_TRUNC('hour', $2::timestamptz)
+     ORDER BY el.sent_at`,
+    [subject, sent_at]
+  )
+  return ok({ recipients: rows })
+}
+
+module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications, listCommunications, getCommunicationDetail }

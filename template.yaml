@@ -313,6 +313,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/users/{id}/notifications
             Method: GET
+        ListCommunications:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/communications
+            Method: GET
+        GetCommunicationDetail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/communications/detail
+            Method: GET
         ResendWebhook:
           Type: HttpApi
           Properties:
