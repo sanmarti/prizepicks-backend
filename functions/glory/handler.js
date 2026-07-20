@@ -267,7 +267,7 @@ async function getGameweekById(pool, gwId, user) {
   for (const o of optRes.rows) {
     if (!optsByEvent[o.event_id]) optsByEvent[o.event_id] = []
     optsByEvent[o.event_id].push({
-      id: o.id, label: o.label, energy_cost: o.energy_cost, result: o.result
+      id: o.id, label: o.label, energy_cost: o.energy_cost, result: o.result, result_key: o.result_key
     })
   }
 
