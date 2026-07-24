@@ -127,7 +127,9 @@ async function listSprints() {
     `SELECT s.*,
        (SELECT COUNT(*) FROM gameweeks g WHERE g.sprint_id=s.id)::int AS linked_gameweeks,
        (SELECT COUNT(DISTINCT user_id) FROM user_sprint_progress WHERE sprint_id=s.id)::int AS participants,
-       (SELECT json_agg(g.status ORDER BY g.sprint_week) FROM gameweeks g WHERE g.sprint_id=s.id) AS gw_statuses
+       (SELECT json_agg(g.status ORDER BY n)
+        FROM generate_series(1, s.gameweek_count) n
+        LEFT JOIN gameweeks g ON g.sprint_id = s.id AND g.sprint_week = n) AS gw_statuses
      FROM sprints s ORDER BY s.start_date DESC`
   )
   return ok(rows)
