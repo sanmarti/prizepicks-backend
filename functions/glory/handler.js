@@ -144,7 +144,7 @@ async function getGloryStatus(event, user) {
 
     // All gameweeks for this sprint (for client-side navigation)
     const allGwRes = await pool.query(
-      `SELECT g.id, g.sprint_week, g.status, g.lock_time,
+      `SELECT g.id, g.sprint_week, g.status, g.lock_time, g.start_date, g.end_date,
               COUNT(DISTINCT e.id)::int AS event_count,
               uge.league_points, uge.correct_picks, uge.incorrect_picks, uge.is_perfect_week
        FROM gameweeks g
