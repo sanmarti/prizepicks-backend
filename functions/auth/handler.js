@@ -87,6 +87,10 @@ async function login(event) {
     "UPDATE users SET last_login_at = NOW(), login_count = login_count + 1 WHERE id = $1",
     [user.id]
   )
+  pool.query(
+    `INSERT INTO user_daily_activity (user_id, day) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING`,
+    [user.id]
+  ).catch(() => {})
 
   const token = await signToken({
     userId:       user.id,

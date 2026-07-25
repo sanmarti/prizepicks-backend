@@ -105,6 +105,12 @@ async function getGloryStatus(event, user) {
     [user.id]
   ).catch(() => {})
 
+  // Record daily activity for DAU tracking
+  pool.query(
+    `INSERT INTO user_daily_activity (user_id, day) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING`,
+    [user.id]
+  ).catch(() => {})
+
   const divStatus = await ensureDivisionStatus(pool, user.id)
 
   // Find the most relevant sprint: prefer sprints that have PUBLISHED or LOCKED gameweeks
