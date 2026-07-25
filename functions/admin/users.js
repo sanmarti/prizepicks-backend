@@ -431,13 +431,21 @@ async function getDashboard(event) {
       ORDER BY s.start_date ASC
       LIMIT 1`),
 
-    // Daily active users by day — any app open or login (real users only)
+    // Daily active users — union of tracked sessions + all other activity signals
     pool.query(`
-      SELECT uda.day, COUNT(DISTINCT uda.user_id)::int AS dau
-      FROM user_daily_activity uda
-      JOIN users u ON u.id = uda.user_id AND u.role = 'user'
-      WHERE uda.day >= CURRENT_DATE - INTERVAL '${interval}'
-      GROUP BY uda.day ORDER BY uda.day ASC`),
+      SELECT day, COUNT(DISTINCT user_id)::int AS dau
+      FROM (
+        SELECT user_id, day FROM user_daily_activity
+        UNION ALL
+        SELECT up.user_id, DATE(up.created_at) FROM user_picks up
+        UNION ALL
+        SELECT uge.user_id, DATE(uge.created_at) FROM user_gameweek_entries uge
+        UNION ALL
+        SELECT et.user_id, DATE(et.created_at) FROM energy_transactions et
+      ) a
+      JOIN users u ON u.id = a.user_id AND u.role = 'user'
+      WHERE a.day >= CURRENT_DATE - INTERVAL '${interval}'
+      GROUP BY day ORDER BY day ASC`),
   ])
 
   const total       = usersTotal.rows[0].count
