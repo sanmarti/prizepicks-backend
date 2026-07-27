@@ -1768,7 +1768,16 @@ async function getGameweekLive(event, user) {
     `SELECT eo.id, eo.event_id, eo.label, eo.result, eo.result_key, eo.energy_cost
      FROM event_options eo
      JOIN events e ON e.id = eo.event_id
-     WHERE e.gameweek_id=$1`,
+     WHERE e.gameweek_id=$1
+     ORDER BY e.id,
+       CASE eo.result_key
+         WHEN 'HOME_WIN'       THEN 1 WHEN 'HOME_QUALIFIES' THEN 1 WHEN 'HOME_CLEAN_SHEET' THEN 1
+         WHEN 'DRAW'           THEN 2
+         WHEN 'AWAY_WIN'       THEN 3 WHEN 'AWAY_QUALIFIES' THEN 3 WHEN 'AWAY_CLEAN_SHEET' THEN 3
+         ELSE CASE WHEN eo.result_key LIKE 'OVER_%'  OR eo.result_key = 'BTTS_YES' OR eo.result_key = 'PLAYER_SCORES'   OR eo.result_key LIKE 'CORNER_OVER_%'  THEN 1
+                   WHEN eo.result_key LIKE 'UNDER_%' OR eo.result_key = 'BTTS_NO'  OR eo.result_key = 'PLAYER_NO_SCORE' OR eo.result_key LIKE 'CORNER_UNDER_%' THEN 3
+                   ELSE 2 END
+       END`,
     [id]
   )
   const optsByEvent = {}

@@ -181,7 +181,14 @@ async function getSprint(event) {
               e.competition, e.match_time,
               COALESCE(
                 json_agg(json_build_object('id',o.id,'label',o.label,'energy_cost',o.energy_cost,'result_key',o.result_key)
-                  ORDER BY o.id) FILTER (WHERE o.id IS NOT NULL),
+                  ORDER BY CASE o.result_key
+                    WHEN 'HOME_WIN'       THEN 1 WHEN 'HOME_QUALIFIES' THEN 1 WHEN 'HOME_CLEAN_SHEET' THEN 1
+                    WHEN 'DRAW'           THEN 2
+                    WHEN 'AWAY_WIN'       THEN 3 WHEN 'AWAY_QUALIFIES' THEN 3 WHEN 'AWAY_CLEAN_SHEET' THEN 3
+                    ELSE CASE WHEN o.result_key LIKE 'OVER_%' OR o.result_key = 'BTTS_YES'  OR o.result_key = 'PLAYER_SCORES'   OR o.result_key LIKE 'CORNER_OVER_%'  THEN 1
+                              WHEN o.result_key LIKE 'UNDER_%' OR o.result_key = 'BTTS_NO' OR o.result_key = 'PLAYER_NO_SCORE' OR o.result_key LIKE 'CORNER_UNDER_%' THEN 3
+                              ELSE 2 END
+                  END) FILTER (WHERE o.id IS NOT NULL),
                 '[]'::json
               ) AS options
        FROM events e
