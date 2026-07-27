@@ -195,7 +195,7 @@ async function getSprint(event) {
        LEFT JOIN event_options o ON o.event_id=e.id
        WHERE e.gameweek_id=$1
        GROUP BY e.id
-       ORDER BY e.match_time ASC`,
+       ORDER BY e.match_time ASC, e.fixture_name ASC`,
       [gw.id]
     )
     gw.events = evRes.rows
