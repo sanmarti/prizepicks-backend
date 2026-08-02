@@ -772,10 +772,7 @@ async function syncProgressDivisions(pool) {
       const lp = 0 // no entries = 0 LP
       let outcome = 'retained', newDivId = currentDiv.id
 
-      if (rec.is_rookie) {
-        outcome = 'rookie'; newDivId = currentDiv.id
-        await pool.query("UPDATE user_division_status SET is_rookie=FALSE, updated_at=NOW() WHERE user_id=$1", [rec.user_id])
-      } else if (!currentDiv.is_highest && lp >= currentDiv.promotion_min_points) {
+      if (!currentDiv.is_highest && lp >= currentDiv.promotion_min_points) {
         const next = snapByOrder[currentDiv.display_order + 1] || currentDivByOrder[currentDiv.display_order + 1]
         if (next) { outcome = 'promoted'; newDivId = next.id }
       } else if (currentDiv.allows_relegation && currentDiv.relegation_max_points !== null && lp <= currentDiv.relegation_max_points) {
@@ -916,15 +913,6 @@ async function settleSprintInternal(pool, sprintId) {
        WHERE user_id=$6 AND sprint_id=$7`,
       [agg.total_correct, agg.total_incorrect, agg.total_lp, agg.perfect_weeks, agg.gw_count, agg.user_id, sprintId]
     )
-
-    if (prog.is_rookie) {
-      await pool.query(
-        "UPDATE user_sprint_progress SET sprint_outcome='rookie', final_division_id=$1, settled_at=NOW() WHERE user_id=$2 AND sprint_id=$3",
-        [prog.division_id, agg.user_id, sprintId]
-      )
-      await pool.query("UPDATE user_division_status SET is_rookie=FALSE, updated_at=NOW() WHERE user_id=$1", [agg.user_id])
-      continue
-    }
 
     const currentDiv = divById[prog.division_id]
     if (!currentDiv) continue

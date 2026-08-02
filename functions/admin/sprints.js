@@ -556,15 +556,6 @@ async function settleSprint(event, adminUser) {
       [agg.total_correct, agg.total_incorrect, agg.total_lp, agg.perfect_weeks, agg.gw_count, agg.user_id, id]
     )
 
-    // Rookies earn promotion/relegation on merit like everyone else
-    // Clear rookie flag for next sprint
-    if (prog.is_rookie) {
-      await pool.query(
-        "UPDATE user_division_status SET is_rookie=FALSE, updated_at=NOW() WHERE user_id=$1",
-        [agg.user_id]
-      )
-    }
-
     const currentDiv = divById[prog.division_id]
     if (!currentDiv) continue
 
