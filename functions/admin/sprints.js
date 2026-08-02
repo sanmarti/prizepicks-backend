@@ -673,6 +673,28 @@ async function settleSprint(event, adminUser) {
     [adminUser.id, id, JSON.stringify({ promotions, retentions, relegations, rookies, settledEntries })]
   )
 
+  // ── Step 7: Seed next sprint progress so ranking shows 0 LP immediately ──
+  const nextSprint = await pool.query(
+    `SELECT id FROM sprints WHERE status='draft' AND start_date > (SELECT start_date FROM sprints WHERE id=$1)
+     ORDER BY start_date ASC LIMIT 1`,
+    [id]
+  )
+  if (nextSprint.rows.length) {
+    const nextId = nextSprint.rows[0].id
+    const activeUsers = await pool.query(
+      `SELECT u.id, uds.division_id, uds.is_rookie
+       FROM users u JOIN user_division_status uds ON uds.user_id = u.id
+       WHERE u.role='user'`
+    )
+    for (const u of activeUsers.rows) {
+      await pool.query(
+        `INSERT INTO user_sprint_progress (user_id, sprint_id, division_id, is_rookie, sprint_outcome)
+         VALUES ($1,$2,$3,$4,'pending') ON CONFLICT (user_id, sprint_id) DO NOTHING`,
+        [u.id, nextId, u.division_id, u.is_rookie]
+      )
+    }
+  }
+
   return ok({
     settled: true,
     sprint_id: id,
@@ -752,6 +774,9 @@ async function getRankings(event) {
        WHERE status IN ('live','scheduled')
           OR (status = 'draft' AND EXISTS (
                 SELECT 1 FROM gameweeks g WHERE g.sprint_id = sprints.id AND g.status IN ('PUBLISHED','LOCKED')
+             ))
+          OR (status = 'draft' AND EXISTS (
+                SELECT 1 FROM user_sprint_progress usp WHERE usp.sprint_id = sprints.id
              ))
        ORDER BY
          CASE WHEN status='live' THEN 0 WHEN status='scheduled' THEN 1 ELSE 2 END,
