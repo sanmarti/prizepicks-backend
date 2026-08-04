@@ -106,12 +106,18 @@ function divider() {
 }
 
 // ── 1. Picks are open ─────────────────────────────────────────────────────────
-function picksOpenEmail({ displayName, sprintName, weekNumber, lockTime }) {
+function picksOpenEmail({ displayName, sprintName, weekNumber, lockTime, competitions = [] }) {
   const lock = new Date(lockTime).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+  const pillsHtml = competitions.length
+    ? `<div style="margin:0 0 20px;display:flex;flex-wrap:wrap;gap:6px;">${competitions.map(c =>
+        `<span style="display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);font-size:11px;font-weight:600;color:#22c55e;letter-spacing:0.04em;">${c}</span>`
+      ).join('')}</div>`
+    : ''
   const body = `
     <p style="margin:0 0 4px;font-size:11px;color:#22c55e;font-weight:700;letter-spacing:0.14em;">NEW MATCHWEEK</p>
     <h1 style="margin:0 0 8px;font-size:24px;font-weight:900;color:#ffffff;line-height:1.2;">Your picks are open ⚽</h1>
-    <p style="margin:0 0 20px;font-size:14px;color:rgba(255,255,255,0.5);line-height:1.6;">Hey ${displayName}, <strong style="color:rgba(255,255,255,0.8);">${sprintName} · Week ${weekNumber}</strong> is live. Make your 6 picks before the deadline.</p>
+    <p style="margin:0 0 16px;font-size:14px;color:rgba(255,255,255,0.5);line-height:1.6;">Hey ${displayName}, <strong style="color:rgba(255,255,255,0.8);">${sprintName} · Week ${weekNumber}</strong> is live. Make your 6 picks before the deadline.</p>
+    ${pillsHtml}
     <div style="background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;padding:14px 18px;">
       <p style="margin:0;font-size:12px;color:rgba(255,255,255,0.4);">Locks</p>
       <p style="margin:4px 0 0;font-size:16px;font-weight:700;color:#22c55e;">${lock}</p>

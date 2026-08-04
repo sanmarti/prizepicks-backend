@@ -175,8 +175,8 @@ async function publishGameweek(event) {
     const sprintRes = await pool.query(
       "SELECT id, status FROM sprints WHERE id=$1", [sprint_id]
     )
-    if (sprintRes.rows.length && sprintRes.rows[0].status === 'draft') {
-      await pool.query("UPDATE sprints SET status='scheduled' WHERE id=$1", [sprint_id])
+    if (sprintRes.rows.length && ['draft', 'scheduled'].includes(sprintRes.rows[0].status)) {
+      await pool.query("UPDATE sprints SET status='live' WHERE id=$1", [sprint_id])
       sprintAutoScheduled = true
     }
   }
@@ -218,15 +218,21 @@ async function publishGameweek(event) {
   )
   if (gwMeta.rows.length) {
     const { sprint_week, lock_time, sprint_name } = gwMeta.rows[0]
+    const compRes = await pool.query(
+      `SELECT DISTINCT competition FROM events WHERE gameweek_id = $1 AND competition IS NOT NULL AND competition != '' ORDER BY competition`,
+      [gameweek_id]
+    )
+    const competitions = compRes.rows.map(r => r.competition)
     const users = await pool.query(
       `SELECT id, email, display_name FROM users WHERE role = 'user' AND notifications_enabled = TRUE`
     )
     for (const u of users.rows) {
       const { subject, html } = picksOpenEmail({
-        displayName: u.display_name || u.email.split('@')[0],
-        sprintName:  sprint_name,
-        weekNumber:  sprint_week,
-        lockTime:    lock_time,
+        displayName:  u.display_name || u.email.split('@')[0],
+        sprintName:   sprint_name,
+        weekNumber:   sprint_week,
+        lockTime:     lock_time,
+        competitions,
       })
       const logId = await createEmailLog(pool, { userId: u.id, type: 'picks_open', subject })
       const resendId = await sendEmail(u.email, subject, injectTracking(html, logId))
