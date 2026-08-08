@@ -228,36 +228,40 @@ function sprintEndEmail({ displayName, sprintName, outcome, divisionName, nextDi
 }
 
 // ── 5. Urgency — 0 points, lock today ────────────────────────────────────────
-function urgencyPicksEmail({ displayName, weekNumber, sprintName, lockTime, gwCompetitions = [], upcomingCompetitions = [] }) {
-  const lock = new Date(lockTime).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })
+function urgencyPicksEmail({ displayName, weekNumber, sprintName, lockTime, logId, gwCompetitions = [], upcomingCompetitions = [] }) {
+  const hoursLeft = Math.round((new Date(lockTime) - new Date()) / 36e5)
+  const timeLabel = hoursLeft <= 1 ? 'less than 1 hour' : `${hoursLeft} hours`
+  const clickUrl = logId
+    ? `${API_BASE}/t/c/${logId}?url=${encodeURIComponent('https://oddsrivals.com/login')}`
+    : 'https://oddsrivals.com/login'
   const gwPillsHtml = gwCompetitions.length
     ? `<div style="margin:12px 0 0;display:flex;flex-wrap:wrap;gap:6px;">${gwCompetitions.map(c =>
-        `<span style="display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);font-size:11px;font-weight:600;color:#22c55e;letter-spacing:0.04em;">${c}</span>`
+        `<span style="display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);font-size:11px;font-weight:600;color:#22c55e;letter-spacing:0.04em;">⚽ ${c}</span>`
       ).join('')}</div>`
     : ''
   const upcomingPillsHtml = upcomingCompetitions.length
     ? `<div style="margin:8px 0 0;display:flex;flex-wrap:wrap;gap:6px;">${upcomingCompetitions.map(c =>
-        `<span style="display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(167,139,250,0.1);border:1px solid rgba(167,139,250,0.25);font-size:11px;font-weight:600;color:#a78bfa;letter-spacing:0.04em;">${c}</span>`
+        `<span style="display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(167,139,250,0.1);border:1px solid rgba(167,139,250,0.25);font-size:11px;font-weight:600;color:#a78bfa;letter-spacing:0.04em;">⚽ ${c}</span>`
       ).join('')}</div>`
     : ''
   const body = `
     <p style="margin:0 0 4px;font-size:11px;color:#f87171;font-weight:700;letter-spacing:0.14em;">ACTION NEEDED</p>
-    <h1 style="margin:0 0 8px;font-size:24px;font-weight:900;color:#ffffff;line-height:1.2;">You have 0 points this week ⚠️</h1>
-    <p style="margin:0 0 20px;font-size:14px;color:rgba(255,255,255,0.5);line-height:1.6;">Hey ${displayName}, you haven't submitted your 6 picks for <strong style="color:rgba(255,255,255,0.8);">${sprintName} · Week ${weekNumber}</strong> yet. The gameweek locks <strong style="color:#f87171;">today at ${lock}</strong> — don't miss your chance to score points this week.</p>
+    <h1 style="margin:0 0 8px;font-size:24px;font-weight:900;color:#ffffff;line-height:1.2;">You have 0 points this week ⚽</h1>
+    <p style="margin:0 0 20px;font-size:14px;color:rgba(255,255,255,0.5);line-height:1.6;">Hey ${displayName}, you haven't submitted your 6 picks for <strong style="color:rgba(255,255,255,0.8);">${sprintName} · Week ${weekNumber}</strong> yet. The gameweek locks in <strong style="color:#f87171;">${timeLabel}</strong> — don't miss your chance to score points this week.</p>
     <div style="background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.25);border-radius:10px;padding:14px 18px;margin-bottom:20px;">
-      <p style="margin:0;font-size:12px;color:rgba(255,255,255,0.4);">Locks today at</p>
-      <p style="margin:4px 0 0;font-size:20px;font-weight:800;color:#f87171;">${lock}</p>
+      <p style="margin:0;font-size:12px;color:rgba(255,255,255,0.4);">Locks in</p>
+      <p style="margin:4px 0 0;font-size:20px;font-weight:800;color:#f87171;">${timeLabel}</p>
     </div>
     <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.5);letter-spacing:0.08em;">THIS WEEK'S CHOICES FROM</p>
     ${gwPillsHtml}
     ${divider()}
     <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.5);letter-spacing:0.08em;">COMING IN THE AUGUST SPRINT</p>
     ${upcomingPillsHtml}
-    ${btn('MAKE MY PICKS NOW →', 'https://oddsrivals.com/login')}
+    ${btn('MAKE MY PICKS NOW →', clickUrl)}
   `
   return {
-    subject: `⚠️ 0 points — Week ${weekNumber} locks today at ${lock}, make your picks now`,
-    html: wrap(`Week ${weekNumber} locks today at ${lock}. You still have 0 points — submit your 6 picks now.`, body),
+    subject: `⚽ 0 points — Week ${weekNumber} closes in ${timeLabel}, make your picks now`,
+    html: wrap(`Week ${weekNumber} closes in ${timeLabel}. You still have 0 points — submit your 6 picks now.`, body),
   }
 }
 

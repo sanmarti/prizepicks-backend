@@ -642,15 +642,17 @@ async function sendUrgencyEmail(event) {
 
   let sent = 0
   for (const u of users) {
+    const logId = await createEmailLog(pool, { userId: u.id, type: 'urgency_picks', subject: '(pending)' })
     const { subject, html } = urgencyPicksEmail({
       displayName:          u.display_name || u.email.split('@')[0],
       weekNumber:           sprint_week,
       sprintName:           sprint_name,
       lockTime:             lock_time,
-      gwCompetitions:       ['Eredivisie', 'Primeira Liga', 'Brasileirão', 'Scottish Premiership'],
-      upcomingCompetitions: ['Premier League', 'La Liga'],
+      logId,
+      gwCompetitions:       ['🇳🇱 Eredivisie', '🇵🇹 Primeira Liga', '🇧🇷 Brasileirão', '🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scottish Premiership'],
+      upcomingCompetitions: ['🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League', '🇪🇸 La Liga'],
     })
-    const logId    = await createEmailLog(pool, { userId: u.id, type: 'urgency_picks', subject })
+    await pool.query('UPDATE email_logs SET subject = $1 WHERE id = $2', [subject, logId])
     const resendId = await sendEmail(u.email, subject, injectTracking(html, logId))
     await updateEmailLogResendId(pool, logId, resendId)
     sent++
