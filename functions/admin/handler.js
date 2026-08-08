@@ -1,7 +1,7 @@
 const { verifyToken, extractFromEvent } = require('../../shared/auth')
 const { error, unauthorized } = require('../../shared/response')
 
-const { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications, listCommunications, getCommunicationDetail } = require('./users')
+const { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications, listCommunications, getCommunicationDetail, sendUrgencyEmail } = require('./users')
 const { importFixtures, createGameweek, getGameweek, updateGameweek, publishGameweek, lockGameweek, unlockGameweek, resolveGameweek, earlySettleGameweek } = require('./gameweeks')
 const { getOddsForFixture, listCompetitions, createCompetition, updateCompetition, deleteCompetition, getCompetitionCalendar, getCompetitionStandings, getFixtureDetails, getCompetitionGameweeks, getAvailableFixtures, importFixturesByRange, browseCompetitions, importCompetitionFromApi, refreshFixtureResults, getPublicScores, getPublicGameweek } = require('./competitions')
 const { listDivisions, createDivision, updateDivision, getDivisionUsers, listSprints, createSprint, getSprint, updateSprint, activateSprint, addSprintGameweek, removeSprintGameweek, updateSprintGameweekDates, settleSprint, getRankings, recalculateSprintEntries } = require('./sprints')
@@ -146,6 +146,7 @@ exports.handler = async (event) => {
     if (routeKey === "PATCH /admin/events/{id}")                   return await updateEvent(event)
     if (routeKey === "POST /admin/events/{id}/resettle")          return await resettleEvent(event)
     if (routeKey === "POST /admin/debug/fix-who-qualifies")       return await fixBrokenWhoQualifies(event)
+    if (routeKey === "POST /admin/email/urgency-picks")           return await sendUrgencyEmail(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)

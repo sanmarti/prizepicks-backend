@@ -1,5 +1,6 @@
 const { getPool } = require('../../shared/db')
 const { ok, error } = require('../../shared/response')
+const { sendEmail, createEmailLog, updateEmailLogResendId, injectTracking, urgencyPicksEmail } = require('../../shared/email')
 
 async function ensureTempPasswordTable(pool) {
   await pool.query(`
@@ -596,4 +597,66 @@ async function getCommunicationDetail(event) {
   return ok({ recipients: rows })
 }
 
-module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications, listCommunications, getCommunicationDetail }
+// Send urgency email to users with 0 picks for the current published gameweek.
+// Body: { gameweek_id, test_user_username? }
+// If test_user_username provided → send only to that user (ignores 0-pick filter).
+async function sendUrgencyEmail(event) {
+  const { gameweek_id, test_user_username } = JSON.parse(event.body || '{}')
+  if (!gameweek_id) return error(400, 'gameweek_id is required')
+
+  const pool = await getPool()
+
+  // Get gameweek meta
+  const gwRes = await pool.query(
+    `SELECT g.sprint_week, g.lock_time, s.name AS sprint_name
+     FROM gameweeks g JOIN sprints s ON s.id = g.sprint_id
+     WHERE g.id = $1`,
+    [gameweek_id]
+  )
+  if (!gwRes.rows.length) return error(404, 'Gameweek not found')
+  const { sprint_week, lock_time, sprint_name } = gwRes.rows[0]
+
+  let users
+  if (test_user_username) {
+    const r = await pool.query(
+      `SELECT id, email, display_name FROM users WHERE username = $1`,
+      [test_user_username]
+    )
+    if (!r.rows.length) return error(404, `User '${test_user_username}' not found`)
+    users = r.rows
+  } else {
+    // All opted-in users who have NOT submitted any picks for this gameweek
+    const r = await pool.query(
+      `SELECT u.id, u.email, u.display_name
+       FROM users u
+       WHERE u.role = 'user'
+         AND u.notifications_enabled = TRUE
+         AND NOT EXISTS (
+           SELECT 1 FROM user_gameweek_entries uge
+           WHERE uge.user_id = u.id AND uge.gameweek_id = $1
+         )`,
+      [gameweek_id]
+    )
+    users = r.rows
+  }
+
+  let sent = 0
+  for (const u of users) {
+    const { subject, html } = urgencyPicksEmail({
+      displayName:          u.display_name || u.email.split('@')[0],
+      weekNumber:           sprint_week,
+      sprintName:           sprint_name,
+      lockTime:             lock_time,
+      gwCompetitions:       ['Eredivisie', 'Primeira Liga', 'Brasileirão', 'Scottish Premiership'],
+      upcomingCompetitions: ['Premier League', 'La Liga'],
+    })
+    const logId    = await createEmailLog(pool, { userId: u.id, type: 'urgency_picks', subject })
+    const resendId = await sendEmail(u.email, subject, injectTracking(html, logId))
+    await updateEmailLogResendId(pool, logId, resendId)
+    sent++
+  }
+
+  return ok({ sent, test_mode: !!test_user_username })
+}
+
+module.exports = { listUsers, getUserDetail, adjustUserEnergy, listLeagues, getStats, getDashboard, deleteUser, resetUserPassword, getUserNotifications, listCommunications, getCommunicationDetail, sendUrgencyEmail }

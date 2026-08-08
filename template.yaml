@@ -650,6 +650,13 @@ Resources:
             Path: /admin/debug/fix-who-qualifies
             Method: POST
 
+        SendUrgencyEmail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/email/urgency-picks
+            Method: POST
+
   # --- LIFECYCLE (scheduled automation) ---
   LifecycleFunction:
     Type: AWS::Serverless::Function
