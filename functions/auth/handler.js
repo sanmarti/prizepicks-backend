@@ -1,10 +1,9 @@
 const bcrypt = require("bcryptjs")
 const { v4: uuidv4 } = require("uuid")
 const { getPool } = require("../../shared/db")
-const { signToken } = require("../../shared/auth")
+const { signToken, verifyToken } = require("../../shared/auth")
 const { ok, error } = require("../../shared/response")
 const { sendEmail, createEmailLog, updateEmailLogResendId, injectTracking, passwordResetEmail } = require("../../shared/email")
-const { signToken, verifyToken } = require("../../shared/auth")
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
