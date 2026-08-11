@@ -21,6 +21,7 @@ exports.handler = async (event) => {
     if (routeKey === 'GET /leagues/{id}/standings')            return await getStandings(event, user)
     if (routeKey === 'POST /leagues/{id}/periods')             return await createPeriod(event, user)
     if (routeKey === 'PUT /leagues/{id}/members/{userId}/payment') return await togglePayment(event, user)
+    if (routeKey === 'DELETE /leagues/{id}/leave')                return await leaveLeague(event, user)
     return error(404, 'Not found')
   } catch (err) {
     console.error(err)
@@ -41,7 +42,20 @@ async function listMyLeagues(event, user) {
         FROM private_league_periods
         WHERE league_id = l.id
         ORDER BY created_at DESC LIMIT 1
-      ) p) AS current_period
+      ) p) AS current_period,
+      (
+        SELECT COUNT(*) + 1
+        FROM private_league_members m2
+        LEFT JOIN (
+          SELECT user_id, COALESCE(SUM(league_points + COALESCE(perfect_week_bonus, 0)), 0) AS pts
+          FROM user_gameweek_entries GROUP BY user_id
+        ) agg ON agg.user_id = m2.user_id
+        WHERE m2.league_id = l.id
+          AND COALESCE(agg.pts, 0) > (
+            SELECT COALESCE(SUM(league_points + COALESCE(perfect_week_bonus, 0)), 0)
+            FROM user_gameweek_entries WHERE user_id = $1
+          )
+      ) AS my_position
     FROM private_leagues l
     JOIN private_league_members m ON m.league_id = l.id AND m.user_id = $1
     ORDER BY l.created_at DESC
@@ -255,6 +269,30 @@ async function togglePayment(event, user) {
   `, [!!has_paid, id, userId])
 
   return ok({ updated: true })
+}
+
+// ── DELETE /leagues/{id}/leave ────────────────────────────────────────────────
+async function leaveLeague(event, user) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  const { rows: [mem] } = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (!mem) return error(404, 'Not a member')
+
+  if (mem.role === 'admin') {
+    const { rows: [{ admin_count }] } = await pool.query(`
+      SELECT COUNT(*) AS admin_count FROM private_league_members WHERE league_id = $1 AND role = 'admin'
+    `, [id])
+    if (parseInt(admin_count) <= 1) return error(400, 'Transfer admin role before leaving')
+  }
+
+  await pool.query(`
+    DELETE FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+
+  return ok({ left: true })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -141,6 +141,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /leagues/{id}/members/{userId}/payment
             Method: PUT
+        LeaveLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/leave
+            Method: DELETE
 
   # --- GAMEWEEKS ---
   GameweeksFunction:
