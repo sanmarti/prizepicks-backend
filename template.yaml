@@ -72,6 +72,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /auth/login
             Method: POST
+        ForgotPassword:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /auth/forgot-password
+            Method: POST
 
   # --- LEAGUES ---
   LeaguesFunction:

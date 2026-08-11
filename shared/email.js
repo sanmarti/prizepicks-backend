@@ -227,7 +227,30 @@ function sprintEndEmail({ displayName, sprintName, outcome, divisionName, nextDi
   }
 }
 
-// ── 5. Urgency — 0 points, lock today ────────────────────────────────────────
+// ── 5. Password reset ────────────────────────────────────────────────────────
+function passwordResetEmail({ displayName, newPassword, logId }) {
+  const clickUrl = logId
+    ? `${API_BASE}/t/c/${logId}?url=${encodeURIComponent('https://oddsrivals.com/login')}`
+    : 'https://oddsrivals.com/login'
+  const body = `
+    <p style="margin:0 0 4px;font-size:11px;color:#a78bfa;font-weight:700;letter-spacing:0.14em;">PASSWORD RESET</p>
+    <h1 style="margin:0 0 8px;font-size:24px;font-weight:900;color:#ffffff;">Your new password 🔑</h1>
+    <p style="margin:0 0 20px;font-size:14px;color:rgba(255,255,255,0.5);line-height:1.6;">Hey ${displayName}, here's your temporary password. Use it to log in, then change it from your account settings.</p>
+    <div style="background:#0a0f1a;border:2px solid rgba(124,110,245,0.4);border-radius:12px;padding:24px 20px;text-align:center;margin-bottom:20px;">
+      <p style="margin:0 0 8px;font-size:11px;color:rgba(255,255,255,0.35);letter-spacing:0.12em;">YOUR NEW PASSWORD</p>
+      <p style="margin:0;font-size:28px;font-weight:900;color:#7c6ef5;letter-spacing:0.12em;font-family:'Courier New',Courier,monospace;">${newPassword}</p>
+      <p style="margin:10px 0 0;font-size:11px;color:rgba(255,255,255,0.25);">tap and hold to copy on mobile</p>
+    </div>
+    <a href="${clickUrl}" style="display:block;margin-top:4px;margin-bottom:20px;padding:14px 28px;background:linear-gradient(90deg,#22c55e,#16a34a);color:#fff;font-size:14px;font-weight:700;text-decoration:none;border-radius:10px;letter-spacing:0.06em;text-align:center;">LOG IN NOW →</a>
+    <p style="margin:0;font-size:12px;color:rgba(255,255,255,0.25);line-height:1.6;">If you didn't request this, you can ignore this email — your old password is still active until you log in with this one.</p>
+  `
+  return {
+    subject: `🔑 Your new OddsRivals password`,
+    html: wrap('Your temporary password is inside — use it to log in.', body),
+  }
+}
+
+// ── 6. Urgency — 0 points, lock today ────────────────────────────────────────
 function urgencyPicksEmail({ displayName, weekNumber, sprintName, lockTime, logId, gwCompetitions = [], upcomingCompetitions = [] }) {
   const hoursLeft = Math.round((new Date(lockTime) - new Date()) / 36e5)
   const timeLabel = hoursLeft <= 1 ? 'less than 1 hour' : `${hoursLeft} hours`
@@ -275,5 +298,6 @@ module.exports = {
   lockReminderEmail,
   resultsEmail,
   sprintEndEmail,
+  passwordResetEmail,
   urgencyPicksEmail,
 }

@@ -3,12 +3,14 @@ const { v4: uuidv4 } = require("uuid")
 const { getPool } = require("../../shared/db")
 const { signToken } = require("../../shared/auth")
 const { ok, error } = require("../../shared/response")
+const { sendEmail, createEmailLog, updateEmailLogResendId, injectTracking, passwordResetEmail } = require("../../shared/email")
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
   try {
-    if (routeKey === "POST /auth/register") return await register(event)
-    if (routeKey === "POST /auth/login")    return await login(event)
+    if (routeKey === "POST /auth/register")        return await register(event)
+    if (routeKey === "POST /auth/login")           return await login(event)
+    if (routeKey === "POST /auth/forgot-password") return await forgotPassword(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -64,6 +66,47 @@ async function register(event) {
     role: "user",
   })
   return ok({ token, userId, email: email.toLowerCase(), display_name }, 201)
+}
+
+async function forgotPassword(event) {
+  const body = JSON.parse(event.body || "{}")
+  const { email } = body
+  if (!email) return error(400, "Email is required")
+
+  const pool = await getPool()
+  const result = await pool.query(
+    "SELECT id, display_name, notifications_enabled FROM users WHERE email = $1 AND role = 'user'",
+    [email.toLowerCase()]
+  )
+
+  // Always return success to avoid email enumeration
+  if (result.rows.length === 0) return ok({ message: "If that email is registered, you'll receive a new password shortly." })
+
+  const user = result.rows[0]
+  const newPassword = generatePassword()
+  const hash = await bcrypt.hash(newPassword, 10)
+
+  await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [hash, user.id])
+
+  const displayName = user.display_name || 'there'
+  const subject = `🔑 Your new OddsRivals password`
+  const logId = await createEmailLog(pool, { userId: user.id, type: 'password_reset', subject })
+  const { html } = passwordResetEmail({ displayName, newPassword, logId })
+  const trackedHtml = injectTracking(html, logId)
+  const resendId = await sendEmail(email.toLowerCase(), subject, trackedHtml)
+  await updateEmailLogResendId(pool, logId, resendId)
+
+  return ok({ message: "If that email is registered, you'll receive a new password shortly." })
+}
+
+function generatePassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
+  let pw = ''
+  for (let i = 0; i < 12; i++) {
+    if (i > 0 && i % 4 === 0) pw += '-'
+    pw += chars[Math.floor(Math.random() * chars.length)]
+  }
+  return pw
 }
 
 async function login(event) {
