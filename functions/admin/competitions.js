@@ -15,6 +15,7 @@ const CURATED_COMPETITIONS = [
   { api_league_id: 5,   name: 'UEFA Nations League',    country: 'Europe',      flag: '🌐', type: 'Tournament', default_season: 2024 },
   { api_league_id: 39,  name: 'Premier League',         country: 'England',     flag: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', type: 'League',     default_season: 2025 },
   { api_league_id: 140, name: 'LaLiga',                 country: 'Spain',       flag: '🇪🇸', type: 'League',     default_season: 2025 },
+  { api_league_id: 141, name: 'Segunda División',       country: 'Spain',       flag: '🇪🇸', type: 'League',     default_season: 2026 },
   { api_league_id: 78,  name: 'Bundesliga',             country: 'Germany',     flag: '🇩🇪', type: 'League',     default_season: 2025 },
   { api_league_id: 135, name: 'Serie A',                country: 'Italy',       flag: '🇮🇹', type: 'League',     default_season: 2025 },
   { api_league_id: 61,  name: 'Ligue 1',                country: 'France',      flag: '🇫🇷', type: 'League',     default_season: 2025 },
