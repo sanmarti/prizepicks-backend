@@ -584,11 +584,15 @@ async function autoCloseExpiredGameweeks(pool) {
   let count = 0
   for (const { id: gwId } of rows) {
     try {
-      // Mark any still-pending event options as LOST so resolveGameweek can score them
+      // Mark pending options as LOST only for events whose fixture is finished (or has no fixture).
+      // Skipping unfinished fixtures prevents mis-settling picks when a fixture is stuck mid-game.
       await pool.query(
         `UPDATE event_options eo SET result = 'LOST'
-         FROM events e WHERE e.id = eo.event_id AND e.gameweek_id = $1
-           AND (eo.result IS NULL OR eo.result = 'PENDING')`,
+         FROM events e
+         LEFT JOIN fixtures f ON f.id::text = e.fixture_id
+         WHERE e.id = eo.event_id AND e.gameweek_id = $1
+           AND (eo.result IS NULL OR eo.result = 'PENDING')
+           AND (e.fixture_id IS NULL OR f.status_short IN ('FT','AET','PEN','AWD','WO','PST','CANC','ABD'))`,
         [gwId]
       )
       // Ensure gameweek is LOCKED before resolving
