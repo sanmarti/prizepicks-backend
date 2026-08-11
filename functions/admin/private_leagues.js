@@ -109,6 +109,20 @@ async function adminCreatePeriod(event) {
   return ok(period, 201)
 }
 
+async function adminUpdatePeriodPrizes(event) {
+  const { id, periodId } = event.pathParameters
+  const body = JSON.parse(event.body || '{}')
+  const prizes = Array.isArray(body.prizes) ? body.prizes : []
+  const pool = await getPool()
+
+  const { rowCount } = await pool.query(`
+    UPDATE private_league_periods SET prize_config = $1 WHERE id = $2 AND league_id = $3
+  `, [JSON.stringify(prizes), periodId, id])
+
+  if (rowCount === 0) return error(404, 'Period not found')
+  return ok({ updated: true })
+}
+
 async function adminTogglePayment(event) {
   const { id, userId } = event.pathParameters
   const body = JSON.parse(event.body || '{}')
@@ -121,4 +135,4 @@ async function adminTogglePayment(event) {
   return ok({ updated: true })
 }
 
-module.exports = { listPrivateLeagues, getPrivateLeague, updatePrivateLeague, adminCreatePeriod, adminTogglePayment }
+module.exports = { listPrivateLeagues, getPrivateLeague, updatePrivateLeague, adminCreatePeriod, adminTogglePayment, adminUpdatePeriodPrizes }

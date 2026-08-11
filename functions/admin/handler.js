@@ -6,7 +6,7 @@ const { importFixtures, createGameweek, getGameweek, updateGameweek, publishGame
 const { getOddsForFixture, listCompetitions, createCompetition, updateCompetition, deleteCompetition, getCompetitionCalendar, getCompetitionStandings, getFixtureDetails, getCompetitionGameweeks, getAvailableFixtures, importFixturesByRange, browseCompetitions, importCompetitionFromApi, refreshFixtureResults, refreshCompetitionCalendar, getPublicScores, getPublicGameweek } = require('./competitions')
 const { listDivisions, createDivision, updateDivision, getDivisionUsers, listSprints, createSprint, getSprint, updateSprint, activateSprint, addSprintGameweek, removeSprintGameweek, updateSprintGameweekDates, settleSprint, getRankings, recalculateSprintEntries } = require('./sprints')
 const { listEnergyPacks, createEnergyPack, updateEnergyPack, deleteEnergyPack } = require('./energy')
-const { listPrivateLeagues, getPrivateLeague, updatePrivateLeague, adminCreatePeriod, adminTogglePayment } = require('./private_leagues')
+const { listPrivateLeagues, getPrivateLeague, updatePrivateLeague, adminCreatePeriod, adminTogglePayment, adminUpdatePeriodPrizes } = require('./private_leagues')
 const { debugDivisions, updateEvent, resettleEvent, fixBrokenWhoQualifies, fixDivisions } = require('./debug')
 
 exports.handler = async (event) => {
@@ -154,6 +154,7 @@ exports.handler = async (event) => {
     if (routeKey === "PUT /admin/private-leagues/{id}")                             return await updatePrivateLeague(event)
     if (routeKey === "POST /admin/private-leagues/{id}/periods")                    return await adminCreatePeriod(event)
     if (routeKey === "PUT /admin/private-leagues/{id}/members/{userId}/payment")    return await adminTogglePayment(event)
+    if (routeKey === "PUT /admin/private-leagues/{id}/periods/{periodId}/prizes")   return await adminUpdatePeriodPrizes(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)

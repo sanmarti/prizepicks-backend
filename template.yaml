@@ -717,6 +717,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/private-leagues/{id}/members/{userId}/payment
             Method: PUT
+        AdminUpdatePrivateLeaguePeriodPrizes:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/periods/{periodId}/prizes
+            Method: PUT
 
   # --- LIFECYCLE (scheduled automation) ---
   LifecycleFunction:
