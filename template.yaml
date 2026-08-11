@@ -439,6 +439,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/competitions/import
             Method: POST
+        RefreshCompetitionCalendar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/competitions/{id}/refresh-calendar
+            Method: POST
         RefreshFixtureResults:
           Type: HttpApi
           Properties:

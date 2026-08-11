@@ -577,6 +577,38 @@ async function importFixturesByRange(event) {
   return ok({ imported: totalImported, message: `Synced ${totalImported} fixtures from ${comps.length} competitions` })
 }
 
+async function refreshCompetitionCalendar(event) {
+  const { id } = event.pathParameters
+  const pool = await getPool()
+
+  const compRes = await pool.query(
+    'SELECT id, api_league_id, api_season, name FROM competitions WHERE id = $1',
+    [id]
+  )
+  if (!compRes.rows.length) return error(404, 'Competition not found')
+  const comp = compRes.rows[0]
+  if (!comp.api_league_id || !comp.api_season)
+    return error(400, 'Competition has no API-Football mapping configured')
+
+  const secrets = await getSecrets()
+  const res = await axios.get(`${API_FOOTBALL_BASE}/fixtures`, {
+    params: { league: comp.api_league_id, season: comp.api_season },
+    headers: { 'x-apisports-key': secrets.key },
+    timeout: 15000,
+  })
+  const apiErrors = res.data?.errors
+  if (apiErrors && Object.keys(apiErrors).length > 0)
+    return error(502, Object.values(apiErrors).join(' '))
+
+  const apiFixtures = res.data?.response || []
+  if (apiFixtures.length === 0) return ok({ imported: 0, message: 'No fixtures returned from API' })
+
+  const rows = apiFixtures.map(f => apiFixtureToRow(f, comp.id))
+  await upsertFixtures(pool, rows)
+
+  return ok({ imported: rows.length, message: `Synced ${rows.length} fixtures for ${comp.name}` })
+}
+
 async function browseCompetitions() {
   const pool = await getPool()
   const { rows: imported } = await pool.query(`
@@ -938,6 +970,6 @@ module.exports = {
   listCompetitions, createCompetition, updateCompetition, deleteCompetition,
   getCompetitionCalendar, getCompetitionStandings, getFixtureDetails, getCompetitionGameweeks,
   getAvailableFixtures, importFixturesByRange, browseCompetitions, importCompetitionFromApi,
-  refreshFixtureResults, getPublicScores, getPublicGameweek,
+  refreshFixtureResults, refreshCompetitionCalendar, getPublicScores, getPublicGameweek,
   apiFixtureToRow, upsertFixtures,
 }
