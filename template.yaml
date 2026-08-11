@@ -129,6 +129,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /leagues/{id}/standings
             Method: GET
+        CreatePeriod:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/periods
+            Method: POST
+        TogglePayment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/members/{userId}/payment
+            Method: PUT
 
   # --- GAMEWEEKS ---
   GameweeksFunction:
@@ -674,6 +686,37 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/email/urgency-picks
             Method: POST
+
+        AdminListPrivateLeagues:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues
+            Method: GET
+        AdminGetPrivateLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}
+            Method: GET
+        AdminUpdatePrivateLeague:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}
+            Method: PUT
+        AdminCreatePrivateLeaguePeriod:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/periods
+            Method: POST
+        AdminTogglePrivateLeagueMemberPayment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/members/{userId}/payment
+            Method: PUT
 
   # --- LIFECYCLE (scheduled automation) ---
   LifecycleFunction:

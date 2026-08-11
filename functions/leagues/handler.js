@@ -1,7 +1,6 @@
-const { v4: uuidv4 } = require("uuid")
-const { getPool } = require("../../shared/db")
-const { verifyToken, extractFromEvent } = require("../../shared/auth")
-const { ok, error, unauthorized } = require("../../shared/response")
+const { getPool } = require('../../shared/db')
+const { verifyToken, extractFromEvent } = require('../../shared/auth')
+const { ok, error, unauthorized } = require('../../shared/response')
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
@@ -14,163 +13,254 @@ exports.handler = async (event) => {
   }
 
   try {
-    if (routeKey === "GET /leagues") return await listLeagues(event, user)
-    if (routeKey === "POST /leagues") return await createLeague(event, user)
-    if (routeKey === "GET /leagues/{id}") return await getLeague(event, user)
-    if (routeKey === "PUT /leagues/{id}") return await updateLeague(event, user)
-    if (routeKey === "POST /leagues/join/{code}") return await joinLeague(event, user)
-    if (routeKey === "GET /leagues/{id}/standings") return await getStandings(event, user)
-    return error(404, "Not found")
+    if (routeKey === 'GET /leagues')                           return await listMyLeagues(event, user)
+    if (routeKey === 'POST /leagues')                          return await createLeague(event, user)
+    if (routeKey === 'GET /leagues/{id}')                      return await getLeague(event, user)
+    if (routeKey === 'PUT /leagues/{id}')                      return await updateLeague(event, user)
+    if (routeKey === 'POST /leagues/join/{code}')              return await joinLeague(event, user)
+    if (routeKey === 'GET /leagues/{id}/standings')            return await getStandings(event, user)
+    if (routeKey === 'POST /leagues/{id}/periods')             return await createPeriod(event, user)
+    if (routeKey === 'PUT /leagues/{id}/members/{userId}/payment') return await togglePayment(event, user)
+    return error(404, 'Not found')
   } catch (err) {
     console.error(err)
-    return error(500, "Internal server error")
+    return error(500, 'Internal server error')
   }
 }
 
-async function listLeagues(event, user) {
+// ── GET /leagues ───────────────────────────────────────────────────────────────
+async function listMyLeagues(event, user) {
   const pool = await getPool()
-  const result = await pool.query(
-    `SELECT l.id, l.name, l.competition, l.season, l.status, l.max_teams,
-            s.points, s.wins, s.losses, s.draws,
-            (SELECT COUNT(*) FROM league_members lm2 WHERE lm2.league_id = l.id) AS member_count,
-            (SELECT g.lock_time FROM gameweeks g WHERE g.league_id = l.id AND g.status = 'PUBLISHED' ORDER BY g.lock_time ASC LIMIT 1) AS next_lock_time
-     FROM leagues l
-     JOIN league_members lm ON lm.league_id = l.id AND lm.user_id = $1
-     LEFT JOIN standings s ON s.league_id = l.id AND s.user_id = $1
-     ORDER BY l.created_at DESC`,
-    [user.userId]
-  )
-  return ok(result.rows)
+  const { rows } = await pool.query(`
+    SELECT
+      l.id, l.name, l.invite_code, l.image_url, l.entry_fee_euros, l.created_at,
+      m.role, m.has_paid,
+      (SELECT COUNT(*) FROM private_league_members WHERE league_id = l.id) AS member_count,
+      (SELECT row_to_json(p) FROM (
+        SELECT id, name, status, created_at
+        FROM private_league_periods
+        WHERE league_id = l.id
+        ORDER BY created_at DESC LIMIT 1
+      ) p) AS current_period
+    FROM private_leagues l
+    JOIN private_league_members m ON m.league_id = l.id AND m.user_id = $1
+    ORDER BY l.created_at DESC
+  `, [user.userId])
+  return ok(rows)
 }
 
+// ── POST /leagues ──────────────────────────────────────────────────────────────
 async function createLeague(event, user) {
-  const body = JSON.parse(event.body || "{}")
-  const { name, competition, season, max_teams, entry_fee, missed_week_rule, league_format } = body
-
-  if (!name || !competition || !season) return error(400, "name, competition and season are required")
+  const body = JSON.parse(event.body || '{}')
+  const { name, entry_fee_euros, image_url } = body
+  if (!name?.trim()) return error(400, 'name is required')
 
   const pool = await getPool()
-  const leagueId = uuidv4()
-  const inviteCode = "PRZE-" + Math.random().toString(36).toUpperCase().slice(2, 6)
+  const invite_code = generateCode()
 
-  await pool.query(
-    `INSERT INTO leagues (id, name, competition, season, creator_id, max_teams, entry_fee, missed_week_rule, league_format, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE')`,
-    [leagueId, name, competition, season, user.userId, max_teams || 12, entry_fee || 0,
-     missed_week_rule || "RANDOM", league_format || "STANDINGS"]
-  )
-  await pool.query(
-    "INSERT INTO invites (id, league_id, code) VALUES ($1, $2, $3)",
-    [uuidv4(), leagueId, inviteCode]
-  )
-  await pool.query(
-    "INSERT INTO league_members (id, league_id, user_id, payment_status) VALUES ($1, $2, $3, 'FREE')",
-    [uuidv4(), leagueId, user.userId]
-  )
-  await pool.query(
-    "INSERT INTO standings (id, league_id, user_id) VALUES ($1, $2, $3)",
-    [uuidv4(), leagueId, user.userId]
-  )
+  const { rows } = await pool.query(`
+    INSERT INTO private_leagues (name, invite_code, image_url, created_by, entry_fee_euros)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id, name, invite_code
+  `, [name.trim(), invite_code, image_url || null, user.userId, entry_fee_euros || 0])
 
-  return ok({ leagueId, inviteCode }, 201)
+  const league = rows[0]
+
+  // Creator is admin member
+  await pool.query(`
+    INSERT INTO private_league_members (league_id, user_id, role)
+    VALUES ($1, $2, 'admin')
+  `, [league.id, user.userId])
+
+  return ok(league, 201)
 }
 
+// ── GET /leagues/{id} ──────────────────────────────────────────────────────────
 async function getLeague(event, user) {
   const { id } = event.pathParameters
   const pool = await getPool()
 
-  const league = await pool.query(
-    `SELECT l.*, i.code AS invite_code,
-            (SELECT COUNT(*) FROM league_members lm WHERE lm.league_id = l.id) AS member_count
-     FROM leagues l
-     LEFT JOIN invites i ON i.league_id = l.id
-     WHERE l.id = $1`,
-    [id]
-  )
-  if (league.rows.length === 0) return error(404, "League not found")
+  // Must be a member
+  const membership = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (membership.rows.length === 0) return error(403, 'Not a member of this league')
 
-  const standings = await pool.query(
-    `SELECT u.display_name, u.avatar_url, s.*
-     FROM standings s JOIN users u ON u.id = s.user_id
-     WHERE s.league_id = $1 ORDER BY s.points DESC, s.total_energy_used ASC`,
-    [id]
-  )
+  const { rows: [league] } = await pool.query(`
+    SELECT l.*, (SELECT COUNT(*) FROM private_league_members WHERE league_id = l.id) AS member_count
+    FROM private_leagues l WHERE l.id = $1
+  `, [id])
+  if (!league) return error(404, 'League not found')
 
-  const nextMatchup = await pool.query(
-    `SELECT m.* FROM matchups m
-     JOIN gameweeks g ON g.id = m.gameweek_id
-     WHERE g.league_id = $1 AND (m.home_user_id = $2 OR m.away_user_id = $2) AND m.status = 'PENDING'
-     ORDER BY g.lock_time ASC LIMIT 1`,
-    [id, user.userId]
-  )
+  const { rows: periods } = await pool.query(`
+    SELECT * FROM private_league_periods WHERE league_id = $1 ORDER BY created_at DESC
+  `, [id])
 
-  return ok({ ...league.rows[0], standings: standings.rows, nextMatchup: nextMatchup.rows[0] || null })
+  const { rows: members } = await pool.query(`
+    SELECT
+      m.user_id, m.role, m.has_paid, m.joined_at,
+      u.display_name, u.avatar_url, u.email
+    FROM private_league_members m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.league_id = $1
+    ORDER BY m.role DESC, m.joined_at ASC
+  `, [id])
+
+  return ok({
+    ...league,
+    my_role: membership.rows[0].role,
+    periods,
+    members,
+  })
 }
 
+// ── PUT /leagues/{id} ─────────────────────────────────────────────────────────
 async function updateLeague(event, user) {
   const { id } = event.pathParameters
-  const body = JSON.parse(event.body || "{}")
+  const body = JSON.parse(event.body || '{}')
   const pool = await getPool()
 
-  const league = await pool.query("SELECT creator_id FROM leagues WHERE id = $1", [id])
-  if (league.rows.length === 0) return error(404, "League not found")
-  if (league.rows[0].creator_id !== user.userId) return error(403, "Only the creator can update this league")
+  const mem = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (mem.rows.length === 0 || mem.rows[0].role !== 'admin') return error(403, 'Admin only')
 
-  const { name, missed_week_rule } = body
-  await pool.query(
-    "UPDATE leagues SET name = COALESCE($1, name), missed_week_rule = COALESCE($2, missed_week_rule) WHERE id = $3",
-    [name || null, missed_week_rule || null, id]
-  )
+  const { name, image_url, entry_fee_euros } = body
+  await pool.query(`
+    UPDATE private_leagues
+    SET name = COALESCE($1, name),
+        image_url = COALESCE($2, image_url),
+        entry_fee_euros = COALESCE($3, entry_fee_euros),
+        updated_at = NOW()
+    WHERE id = $4
+  `, [name || null, image_url || null, entry_fee_euros ?? null, id])
+
   return ok({ updated: true })
 }
 
+// ── POST /leagues/join/{code} ─────────────────────────────────────────────────
 async function joinLeague(event, user) {
   const { code } = event.pathParameters
   const pool = await getPool()
 
-  const invite = await pool.query(
-    "SELECT i.league_id, l.max_teams FROM invites i JOIN leagues l ON l.id = i.league_id WHERE i.code = $1",
-    [code.toUpperCase()]
-  )
-  if (invite.rows.length === 0) return error(404, "Invalid invite code")
+  const { rows: [league] } = await pool.query(`
+    SELECT id, name FROM private_leagues WHERE invite_code = $1
+  `, [code.toUpperCase()])
+  if (!league) return error(404, 'Invalid invite code')
 
-  const { league_id, max_teams } = invite.rows[0]
+  const existing = await pool.query(`
+    SELECT id FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [league.id, user.userId])
+  if (existing.rows.length > 0) return error(409, 'Already a member')
 
-  const memberCount = await pool.query(
-    "SELECT COUNT(*) AS count FROM league_members WHERE league_id = $1",
-    [league_id]
-  )
-  if (parseInt(memberCount.rows[0].count) >= max_teams) return error(409, "League is full")
+  await pool.query(`
+    INSERT INTO private_league_members (league_id, user_id, role) VALUES ($1, $2, 'member')
+  `, [league.id, user.userId])
 
-  const existing = await pool.query(
-    "SELECT id FROM league_members WHERE league_id = $1 AND user_id = $2",
-    [league_id, user.userId]
-  )
-  if (existing.rows.length > 0) return error(409, "Already a member of this league")
-
-  await pool.query(
-    "INSERT INTO league_members (id, league_id, user_id, payment_status) VALUES ($1, $2, $3, 'FREE')",
-    [uuidv4(), league_id, user.userId]
-  )
-  await pool.query(
-    "INSERT INTO standings (id, league_id, user_id) VALUES ($1, $2, $3)",
-    [uuidv4(), league_id, user.userId]
-  )
-
-  return ok({ leagueId: league_id, joined: true })
+  return ok({ league_id: league.id, league_name: league.name, joined: true })
 }
 
+// ── GET /leagues/{id}/standings ───────────────────────────────────────────────
 async function getStandings(event, user) {
   const { id } = event.pathParameters
   const pool = await getPool()
 
-  const result = await pool.query(
-    `SELECT u.display_name, u.avatar_url, s.wins, s.losses, s.draws, s.points, s.total_energy_used,
-            ROW_NUMBER() OVER (ORDER BY s.points DESC, s.total_energy_used ASC) AS position
-     FROM standings s JOIN users u ON u.id = s.user_id
-     WHERE s.league_id = $1
-     ORDER BY s.points DESC, s.total_energy_used ASC`,
-    [id]
-  )
-  return ok(result.rows)
+  // Must be a member
+  const mem = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (mem.rows.length === 0) return error(403, 'Not a member')
+
+  // Get current (latest) period
+  const { rows: [period] } = await pool.query(`
+    SELECT * FROM private_league_periods WHERE league_id = $1 ORDER BY created_at DESC LIMIT 1
+  `, [id])
+
+  // Build date filter: if period has start/end matchweeks use their dates, else no filter
+  let dateFilter = ''
+  let dateParams = [id]
+  if (period?.start_matchweek_id && period?.end_matchweek_id) {
+    const { rows: [bounds] } = await pool.query(`
+      SELECT MIN(start_date) AS from_dt, MAX(end_date) AS to_dt
+      FROM gameweeks WHERE id IN ($1, $2)
+    `, [period.start_matchweek_id, period.end_matchweek_id])
+    if (bounds?.from_dt) {
+      dateFilter = `AND g.start_date >= $2 AND g.end_date <= $3`
+      dateParams = [id, bounds.from_dt, bounds.to_dt]
+    }
+  }
+
+  const { rows } = await pool.query(`
+    SELECT
+      u.id AS user_id, u.display_name, u.avatar_url,
+      m.has_paid,
+      COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) AS total_points,
+      COALESCE(SUM(uge.correct_picks), 0) AS correct_picks,
+      COUNT(DISTINCT uge.gameweek_id) AS gameweeks_played,
+      ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) DESC, u.display_name ASC) AS position
+    FROM private_league_members m
+    JOIN users u ON u.id = m.user_id
+    LEFT JOIN user_gameweek_entries uge ON uge.user_id = m.user_id
+    LEFT JOIN gameweeks g ON g.id = uge.gameweek_id ${dateFilter}
+    WHERE m.league_id = $1
+    GROUP BY u.id, u.display_name, u.avatar_url, m.has_paid
+    ORDER BY total_points DESC, u.display_name ASC
+  `, dateParams)
+
+  return ok({ period: period || null, standings: rows })
+}
+
+// ── POST /leagues/{id}/periods ────────────────────────────────────────────────
+async function createPeriod(event, user) {
+  const { id } = event.pathParameters
+  const body = JSON.parse(event.body || '{}')
+  const pool = await getPool()
+
+  const mem = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (mem.rows.length === 0 || mem.rows[0].role !== 'admin') return error(403, 'Admin only')
+
+  const { name, start_matchweek_id, end_matchweek_id, prize_config } = body
+  if (!name?.trim()) return error(400, 'name is required')
+
+  // Close any live periods first
+  await pool.query(`
+    UPDATE private_league_periods SET status = 'completed' WHERE league_id = $1 AND status = 'live'
+  `, [id])
+
+  const { rows: [period] } = await pool.query(`
+    INSERT INTO private_league_periods (league_id, name, start_matchweek_id, end_matchweek_id, status, prize_config)
+    VALUES ($1, $2, $3, $4, 'live', $5)
+    RETURNING *
+  `, [id, name.trim(), start_matchweek_id || null, end_matchweek_id || null, prize_config ? JSON.stringify(prize_config) : '{}'])
+
+  return ok(period, 201)
+}
+
+// ── PUT /leagues/{id}/members/{userId}/payment ────────────────────────────────
+async function togglePayment(event, user) {
+  const { id, userId } = event.pathParameters
+  const body = JSON.parse(event.body || '{}')
+  const pool = await getPool()
+
+  const mem = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (mem.rows.length === 0 || mem.rows[0].role !== 'admin') return error(403, 'Admin only')
+
+  const { has_paid } = body
+  await pool.query(`
+    UPDATE private_league_members SET has_paid = $1 WHERE league_id = $2 AND user_id = $3
+  `, [!!has_paid, id, userId])
+
+  return ok({ updated: true })
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function generateCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  for (let i = 0; i < 8; i++) code += chars[Math.floor(Math.random() * chars.length)]
+  return code
 }

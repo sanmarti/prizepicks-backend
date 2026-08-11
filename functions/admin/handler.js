@@ -6,6 +6,7 @@ const { importFixtures, createGameweek, getGameweek, updateGameweek, publishGame
 const { getOddsForFixture, listCompetitions, createCompetition, updateCompetition, deleteCompetition, getCompetitionCalendar, getCompetitionStandings, getFixtureDetails, getCompetitionGameweeks, getAvailableFixtures, importFixturesByRange, browseCompetitions, importCompetitionFromApi, refreshFixtureResults, refreshCompetitionCalendar, getPublicScores, getPublicGameweek } = require('./competitions')
 const { listDivisions, createDivision, updateDivision, getDivisionUsers, listSprints, createSprint, getSprint, updateSprint, activateSprint, addSprintGameweek, removeSprintGameweek, updateSprintGameweekDates, settleSprint, getRankings, recalculateSprintEntries } = require('./sprints')
 const { listEnergyPacks, createEnergyPack, updateEnergyPack, deleteEnergyPack } = require('./energy')
+const { listPrivateLeagues, getPrivateLeague, updatePrivateLeague, adminCreatePeriod, adminTogglePayment } = require('./private_leagues')
 const { debugDivisions, updateEvent, resettleEvent, fixBrokenWhoQualifies, fixDivisions } = require('./debug')
 
 exports.handler = async (event) => {
@@ -148,6 +149,11 @@ exports.handler = async (event) => {
     if (routeKey === "POST /admin/events/{id}/resettle")          return await resettleEvent(event)
     if (routeKey === "POST /admin/debug/fix-who-qualifies")       return await fixBrokenWhoQualifies(event)
     if (routeKey === "POST /admin/email/urgency-picks")           return await sendUrgencyEmail(event)
+    if (routeKey === "GET /admin/private-leagues")                                  return await listPrivateLeagues()
+    if (routeKey === "GET /admin/private-leagues/{id}")                             return await getPrivateLeague(event)
+    if (routeKey === "PUT /admin/private-leagues/{id}")                             return await updatePrivateLeague(event)
+    if (routeKey === "POST /admin/private-leagues/{id}/periods")                    return await adminCreatePeriod(event)
+    if (routeKey === "PUT /admin/private-leagues/{id}/members/{userId}/payment")    return await adminTogglePayment(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
