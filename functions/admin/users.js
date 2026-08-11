@@ -572,6 +572,7 @@ async function listCommunications() {
        ROUND(COUNT(opened_at)  * 100.0 / NULLIF(COUNT(*),0), 1) AS open_rate,
        ROUND(COUNT(clicked_at) * 100.0 / NULLIF(COUNT(*),0), 1) AS click_rate
      FROM email_logs
+     WHERE type NOT IN ('re_engagement_reset', 're_engagement_login')
      GROUP BY type, subject, DATE_TRUNC('hour', sent_at)
      ORDER BY DATE_TRUNC('hour', sent_at) DESC`
   )
@@ -586,10 +587,21 @@ async function getCommunicationDetail(event) {
     `SELECT
        el.id, el.resend_id, el.subject, el.type,
        el.sent_at, el.opened_at, el.clicked_at,
-       u.email, u.display_name
+       u.email, u.display_name,
+       reset_log.clicked_at AS reset_clicked_at,
+       login_log.clicked_at AS login_clicked_at
      FROM email_logs el
      JOIN users u ON u.id = el.user_id
+     LEFT JOIN email_logs reset_log
+       ON reset_log.user_id = el.user_id
+      AND reset_log.type = 're_engagement_reset'
+      AND DATE_TRUNC('hour', reset_log.sent_at) = DATE_TRUNC('hour', el.sent_at)
+     LEFT JOIN email_logs login_log
+       ON login_log.user_id = el.user_id
+      AND login_log.type = 're_engagement_login'
+      AND DATE_TRUNC('hour', login_log.sent_at) = DATE_TRUNC('hour', el.sent_at)
      WHERE el.subject = $1
+       AND el.type NOT IN ('re_engagement_reset', 're_engagement_login')
        AND DATE_TRUNC('hour', el.sent_at) = DATE_TRUNC('hour', $2::timestamptz)
      ORDER BY el.sent_at`,
     [subject, sent_at]
