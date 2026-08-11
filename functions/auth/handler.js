@@ -4,13 +4,15 @@ const { getPool } = require("../../shared/db")
 const { signToken } = require("../../shared/auth")
 const { ok, error } = require("../../shared/response")
 const { sendEmail, createEmailLog, updateEmailLogResendId, injectTracking, passwordResetEmail } = require("../../shared/email")
+const { signToken, verifyToken } = require("../../shared/auth")
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
   try {
     if (routeKey === "POST /auth/register")        return await register(event)
     if (routeKey === "POST /auth/login")           return await login(event)
-    if (routeKey === "POST /auth/forgot-password") return await forgotPassword(event)
+    if (routeKey === "POST /auth/forgot-password")         return await forgotPassword(event)
+    if (routeKey === "GET /auth/reset-password-magic")    return await resetPasswordMagic(event)
     return error(404, "Not found")
   } catch (err) {
     console.error(err)
@@ -97,6 +99,54 @@ async function forgotPassword(event) {
   await updateEmailLogResendId(pool, logId, resendId)
 
   return ok({ message: "If that email is registered, you'll receive a new password shortly." })
+}
+
+async function resetPasswordMagic(event) {
+  const token = event.queryStringParameters?.token
+  const htmlPage = (title, msg, color = '#22c55e') => ({
+    statusCode: 200,
+    headers: { 'Content-Type': 'text/html' },
+    body: `<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>OddsRivals</title></head>
+<body style="margin:0;padding:40px 20px;background:#060a10;font-family:'Helvetica Neue',Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:80vh;">
+<div style="max-width:420px;width:100%;text-align:center;">
+  <div style="font-size:22px;font-weight:900;letter-spacing:0.06em;color:#fff;margin-bottom:32px;">ODDS<span style="color:#22c55e;">RIVALS</span></div>
+  <div style="background:#0d1117;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:36px 28px;">
+    <div style="font-size:48px;margin-bottom:16px;">${color === '#22c55e' ? '📬' : '⚠️'}</div>
+    <h1 style="margin:0 0 12px;font-size:22px;font-weight:900;color:#fff;">${title}</h1>
+    <p style="margin:0 0 28px;font-size:14px;color:rgba(255,255,255,0.45);line-height:1.7;">${msg}</p>
+    <a href="https://oddsrivals.com/login" style="display:inline-block;padding:13px 32px;background:linear-gradient(90deg,#22c55e,#16a34a);color:#fff;font-size:14px;font-weight:700;text-decoration:none;border-radius:10px;letter-spacing:0.06em;">GO TO LOGIN →</a>
+  </div>
+</div></body></html>`,
+  })
+
+  if (!token) return htmlPage('Invalid link', 'This link is missing a token. Please request a new password from the login page.', '#f87171')
+
+  let payload
+  try {
+    payload = await verifyToken(token)
+  } catch {
+    return htmlPage('Link expired', 'This link has expired or is invalid. Please request a new password from the login page.', '#f87171')
+  }
+
+  if (payload.purpose !== 'password_reset') return htmlPage('Invalid link', 'This link is not valid for password reset.', '#f87171')
+
+  const pool = await getPool()
+  const result = await pool.query("SELECT id, email, display_name FROM users WHERE id = $1", [payload.userId])
+  if (result.rows.length === 0) return htmlPage('User not found', 'No account found. Please register at oddsrivals.com.', '#f87171')
+
+  const user = result.rows[0]
+  const newPassword = generatePassword()
+  const hash = await bcrypt.hash(newPassword, 10)
+  await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [hash, user.id])
+
+  const subject = `🔑 Your new OddsRivals password`
+  const logId = await createEmailLog(pool, { userId: user.id, type: 'password_reset', subject })
+  const { html } = passwordResetEmail({ displayName: user.display_name || 'there', newPassword, logId })
+  const trackedHtml = injectTracking(html, logId)
+  const resendId = await sendEmail(user.email, subject, trackedHtml)
+  await updateEmailLogResendId(pool, logId, resendId)
+
+  return htmlPage('Password sent!', `We've sent a new password to <strong style="color:rgba(255,255,255,0.8);">${user.email}</strong>. Check your inbox and use it to log in.`)
 }
 
 function generatePassword() {

@@ -78,6 +78,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /auth/forgot-password
             Method: POST
+        ResetPasswordMagic:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /auth/reset-password-magic
+            Method: GET
 
   # --- LEAGUES ---
   LeaguesFunction:

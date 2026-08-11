@@ -227,7 +227,30 @@ function sprintEndEmail({ displayName, sprintName, outcome, divisionName, nextDi
   }
 }
 
-// ── 5. Password reset ────────────────────────────────────────────────────────
+// ── 5. Re-engagement (inactive user) ─────────────────────────────────────────
+function reEngagementEmail({ displayName, magicToken, logId }) {
+  const magicUrl = `${API_BASE}/auth/reset-password-magic?token=${encodeURIComponent(magicToken)}`
+  const clickUrl = logId
+    ? `${API_BASE}/t/c/${logId}?url=${encodeURIComponent(magicUrl)}`
+    : magicUrl
+  const body = `
+    <p style="margin:0 0 4px;font-size:11px;color:#a78bfa;font-weight:700;letter-spacing:0.14em;">WE MISS YOU</p>
+    <h1 style="margin:0 0 8px;font-size:24px;font-weight:900;color:#ffffff;line-height:1.2;">Haven't seen your picks in a while ⚽</h1>
+    <p style="margin:0 0 20px;font-size:14px;color:rgba(255,255,255,0.5);line-height:1.6;">Hey ${displayName}, we noticed you haven't submitted your picks in a while. The sprint is heating up — don't let your rivals pull ahead.</p>
+    <div style="background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.2);border-radius:10px;padding:16px 18px;margin-bottom:20px;">
+      <p style="margin:0 0 6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.7);">Forgotten your password?</p>
+      <p style="margin:0;font-size:13px;color:rgba(255,255,255,0.4);line-height:1.6;">No worries — click the button below and we'll instantly send you a new one to this email.</p>
+    </div>
+    <a href="${clickUrl}" style="display:block;padding:14px 28px;background:linear-gradient(90deg,#7c6ef5,#5b4ee8);color:#fff;font-size:14px;font-weight:700;text-decoration:none;border-radius:10px;letter-spacing:0.06em;text-align:center;margin-bottom:12px;">SEND ME A NEW PASSWORD →</a>
+    <a href="https://oddsrivals.com/login" style="display:block;padding:14px 28px;background:linear-gradient(90deg,#22c55e,#16a34a);color:#fff;font-size:14px;font-weight:700;text-decoration:none;border-radius:10px;letter-spacing:0.06em;text-align:center;">I REMEMBER MY PASSWORD →</a>
+  `
+  return {
+    subject: `⚽ We miss you — haven't seen your picks in a while`,
+    html: wrap("The sprint is heating up — we haven't seen your picks in a while.", body),
+  }
+}
+
+// ── 6. Password reset ────────────────────────────────────────────────────────
 function passwordResetEmail({ displayName, newPassword, logId }) {
   const clickUrl = logId
     ? `${API_BASE}/t/c/${logId}?url=${encodeURIComponent('https://oddsrivals.com/login')}`
@@ -299,5 +322,6 @@ module.exports = {
   resultsEmail,
   sprintEndEmail,
   passwordResetEmail,
+  reEngagementEmail,
   urgencyPicksEmail,
 }
