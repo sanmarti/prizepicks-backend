@@ -565,16 +565,16 @@ async function listCommunications() {
     `SELECT
        type,
        subject,
-       DATE_TRUNC('hour', sent_at) AS sent_at,
-       COUNT(*)::int                                          AS total_sent,
-       COUNT(opened_at)::int                                 AS opened,
-       COUNT(clicked_at)::int                                AS clicked,
+       MIN(sent_at)                                          AS sent_at,
+       COUNT(*)::int                                         AS total_sent,
+       COUNT(opened_at)::int                                AS opened,
+       COUNT(clicked_at)::int                               AS clicked,
        ROUND(COUNT(opened_at)  * 100.0 / NULLIF(COUNT(*),0), 1) AS open_rate,
        ROUND(COUNT(clicked_at) * 100.0 / NULLIF(COUNT(*),0), 1) AS click_rate
      FROM email_logs
      WHERE type NOT IN ('re_engagement_reset', 're_engagement_login')
      GROUP BY type, subject, DATE_TRUNC('hour', sent_at)
-     ORDER BY DATE_TRUNC('hour', sent_at) DESC`
+     ORDER BY MIN(sent_at) DESC`
   )
   return ok({ communications: rows })
 }
