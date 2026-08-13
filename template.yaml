@@ -135,6 +135,18 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /leagues/{id}/periods
             Method: POST
+        UpdatePeriod:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/periods/{periodId}
+            Method: PUT
+        ListSprints:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/sprints
+            Method: GET
         TogglePayment:
           Type: HttpApi
           Properties:

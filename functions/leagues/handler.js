@@ -20,6 +20,8 @@ exports.handler = async (event) => {
     if (routeKey === 'POST /leagues/join/{code}')              return await joinLeague(event, user)
     if (routeKey === 'GET /leagues/{id}/standings')            return await getStandings(event, user)
     if (routeKey === 'POST /leagues/{id}/periods')             return await createPeriod(event, user)
+    if (routeKey === 'PUT /leagues/{id}/periods/{periodId}')   return await updatePeriod(event, user)
+    if (routeKey === 'GET /leagues/sprints')                   return await listSprints(event, user)
     if (routeKey === 'PUT /leagues/{id}/members/{userId}/payment') return await togglePayment(event, user)
     if (routeKey === 'DELETE /leagues/{id}/leave')                return await leaveLeague(event, user)
     return error(404, 'Not found')
@@ -250,6 +252,66 @@ async function createPeriod(event, user) {
   `, [id, name.trim(), start_matchweek_id || null, end_matchweek_id || null, prize_config ? JSON.stringify(prize_config) : '{}'])
 
   return ok(period, 201)
+}
+
+// ── GET /leagues/sprints ──────────────────────────────────────────────────────
+async function listSprints(event, user) {
+  const pool = await getPool()
+  const { rows } = await pool.query(`
+    SELECT id, name, status, start_date, end_date
+    FROM sprints
+    WHERE end_date >= NOW() - INTERVAL '8 weeks'
+    ORDER BY start_date ASC
+    LIMIT 20
+  `)
+  return ok(rows)
+}
+
+// ── PUT /leagues/{id}/periods/{periodId} ──────────────────────────────────────
+async function updatePeriod(event, user) {
+  const { id, periodId } = event.pathParameters
+  const { name, start_sprint_id, end_sprint_id } = JSON.parse(event.body || '{}')
+  const pool = await getPool()
+
+  const mem = await pool.query(
+    'SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2',
+    [id, user.userId]
+  )
+  if (!mem.rows.length || mem.rows[0].role !== 'admin') return error(403, 'Admin only')
+
+  const { rows: [period] } = await pool.query(
+    'SELECT id FROM private_league_periods WHERE id = $1 AND league_id = $2',
+    [periodId, id]
+  )
+  if (!period) return error(404, 'Period not found')
+
+  // Map sprint IDs → first/last gameweek of those sprints
+  let startGwId = null, endGwId = null
+  if (start_sprint_id) {
+    const { rows: [gw] } = await pool.query(
+      'SELECT id FROM gameweeks WHERE sprint_id = $1 ORDER BY start_date ASC NULLS LAST LIMIT 1',
+      [start_sprint_id]
+    )
+    startGwId = gw?.id || null
+  }
+  if (end_sprint_id) {
+    const { rows: [gw] } = await pool.query(
+      'SELECT id FROM gameweeks WHERE sprint_id = $1 ORDER BY end_date DESC NULLS LAST, lock_time DESC LIMIT 1',
+      [end_sprint_id]
+    )
+    endGwId = gw?.id || null
+  }
+
+  await pool.query(
+    `UPDATE private_league_periods
+     SET name = COALESCE($1, name),
+         start_matchweek_id = CASE WHEN $2::uuid IS NOT NULL THEN $2::uuid ELSE start_matchweek_id END,
+         end_matchweek_id   = CASE WHEN $3::uuid IS NOT NULL THEN $3::uuid ELSE end_matchweek_id END
+     WHERE id = $4`,
+    [name?.trim() || null, startGwId, endGwId, periodId]
+  )
+
+  return ok({ updated: true })
 }
 
 // ── PUT /leagues/{id}/members/{userId}/payment ────────────────────────────────
