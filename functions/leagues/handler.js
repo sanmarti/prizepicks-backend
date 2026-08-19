@@ -192,14 +192,14 @@ async function getStandings(event, user) {
     SELECT * FROM private_league_periods WHERE league_id = $1 ORDER BY created_at DESC LIMIT 1
   `, [id])
 
-  // Build date filter: if period has start/end matchweeks use their dates, else no filter
+  // Build date filter: if period has start/end sprint IDs use their dates, else no filter
   let dateFilter = ''
   let dateParams = [id]
-  if (period?.start_matchweek_id && period?.end_matchweek_id) {
+  if (period?.start_matchweek_id || period?.end_matchweek_id) {
     const { rows: [bounds] } = await pool.query(`
       SELECT MIN(start_date) AS from_dt, MAX(end_date) AS to_dt
-      FROM gameweeks WHERE id IN ($1, $2)
-    `, [period.start_matchweek_id, period.end_matchweek_id])
+      FROM sprints WHERE id IN ($1, $2)
+    `, [period.start_matchweek_id || period.end_matchweek_id, period.end_matchweek_id || period.start_matchweek_id])
     if (bounds?.from_dt) {
       dateFilter = `AND g.start_date >= $2 AND g.end_date <= $3`
       dateParams = [id, bounds.from_dt, bounds.to_dt]
@@ -285,30 +285,14 @@ async function updatePeriod(event, user) {
   )
   if (!period) return error(404, 'Period not found')
 
-  // Map sprint IDs → first/last gameweek of those sprints
-  let startGwId = null, endGwId = null
-  if (start_sprint_id) {
-    const { rows: [gw] } = await pool.query(
-      'SELECT id FROM gameweeks WHERE sprint_id = $1 ORDER BY start_date ASC NULLS LAST LIMIT 1',
-      [start_sprint_id]
-    )
-    startGwId = gw?.id || null
-  }
-  if (end_sprint_id) {
-    const { rows: [gw] } = await pool.query(
-      'SELECT id FROM gameweeks WHERE sprint_id = $1 ORDER BY end_date DESC NULLS LAST, lock_time DESC LIMIT 1',
-      [end_sprint_id]
-    )
-    endGwId = gw?.id || null
-  }
-
+  // Store sprint IDs directly in the matchweek columns (now UUID type)
   await pool.query(
     `UPDATE private_league_periods
-     SET name = COALESCE($1, name),
-         start_matchweek_id = CASE WHEN $2::uuid IS NOT NULL THEN $2::uuid ELSE start_matchweek_id END,
-         end_matchweek_id   = CASE WHEN $3::uuid IS NOT NULL THEN $3::uuid ELSE end_matchweek_id END
+     SET name               = COALESCE($1, name),
+         start_matchweek_id = COALESCE($2::uuid, start_matchweek_id),
+         end_matchweek_id   = COALESCE($3::uuid, end_matchweek_id)
      WHERE id = $4`,
-    [name?.trim() || null, startGwId, endGwId, periodId]
+    [name?.trim() || null, start_sprint_id || null, end_sprint_id || null, periodId]
   )
 
   return ok({ updated: true })
