@@ -54,7 +54,7 @@ exports.handler = async (event) => {
 // ── Ensure user has a division status (auto-assign Academy for new users) ─────
 async function ensureDivisionStatus(pool, userId) {
   const existing = await pool.query(
-    "SELECT uds.*, d.name as division_name, d.icon, d.color_primary, d.display_order FROM user_division_status uds JOIN divisions d ON d.id=uds.division_id WHERE uds.user_id=$1",
+    "SELECT uds.*, d.name as division_name, d.icon, d.badge_url, d.color_primary, d.display_order, d.promotion_min_points, d.relegation_max_points, d.retention_min_points, d.retention_max_points, d.is_highest FROM user_division_status uds JOIN divisions d ON d.id=uds.division_id WHERE uds.user_id=$1",
     [userId]
   )
   if (existing.rows.length) return existing.rows[0]
@@ -75,7 +75,7 @@ async function ensureDivisionStatus(pool, userId) {
   )
 
   const fresh = await pool.query(
-    "SELECT uds.*, d.name as division_name, d.icon, d.color_primary, d.display_order FROM user_division_status uds JOIN divisions d ON d.id=uds.division_id WHERE uds.user_id=$1",
+    "SELECT uds.*, d.name as division_name, d.icon, d.badge_url, d.color_primary, d.display_order, d.promotion_min_points, d.relegation_max_points, d.retention_min_points, d.retention_max_points, d.is_highest FROM user_division_status uds JOIN divisions d ON d.id=uds.division_id WHERE uds.user_id=$1",
     [userId]
   )
   return fresh.rows[0] ?? null
@@ -482,12 +482,14 @@ async function getProfile(event, user) {
     `SELECT usp.*,
             s.name AS sprint_name, s.start_date, s.end_date,
             fd.name AS from_division_name, fd.icon AS from_icon,
-            td.name AS final_division_name, td.icon AS final_icon
+            fd.badge_url AS from_badge_url, fd.display_order AS from_display_order,
+            td.name AS final_division_name, td.icon AS final_icon,
+            td.badge_url AS final_badge_url, td.display_order AS final_display_order
      FROM user_sprint_progress usp
      JOIN sprints s ON s.id=usp.sprint_id
      LEFT JOIN divisions fd ON fd.id=usp.division_id
      LEFT JOIN divisions td ON td.id=usp.final_division_id
-     WHERE usp.user_id=$1 ORDER BY s.start_date DESC`,
+     WHERE usp.user_id=$1 AND usp.settled_at IS NOT NULL ORDER BY s.start_date DESC`,
     [user.id]
   )
 
