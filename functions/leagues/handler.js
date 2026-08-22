@@ -23,6 +23,7 @@ exports.handler = async (event) => {
     if (routeKey === 'GET /leagues/{id}/matchup')                   return await getMatchupForUser(event, user)
     if (routeKey === 'POST /leagues/{id}/picks')                    return await submitLeaguePicks(event, user)
     if (routeKey === 'GET /leagues/{id}/calendar')                  return await getLeagueCalendar(event, user)
+    if (routeKey === 'GET /leagues/{id}/week/{week}/matchups')      return await getWeekMatchups(event, user)
     if (routeKey === 'PUT /leagues/{id}/members/{userId}/payment')  return await togglePayment(event, user)
     if (routeKey === 'DELETE /leagues/{id}/leave')                  return await leaveLeague(event, user)
     return error(404, 'Not found')
@@ -382,6 +383,75 @@ async function getLeagueCalendar(event, user) {
   }
 
   return ok({ calendar })
+}
+
+// ── GET /leagues/{id}/week/{week}/matchups ────────────────────────────────────
+async function getWeekMatchups(event, user) {
+  const { id, week } = event.pathParameters
+  const pool = await getPool()
+
+  const mem = await pool.query(
+    'SELECT role FROM private_league_members WHERE league_id=$1 AND user_id=$2',
+    [id, user.userId]
+  )
+  if (!mem.rows.length) return error(403, 'Not a member')
+
+  const { rows: matchups } = await pool.query(`
+    SELECT
+      m.id, m.league_week, m.status, m.gameweek_id,
+      m.home_user_id, hu.display_name AS home_name, hu.avatar_url AS home_avatar,
+      m.away_user_id, au.display_name AS away_name, au.avatar_url AS away_avatar,
+      m.home_score, m.away_score, m.home_league_points, m.away_league_points,
+      gw.status AS gw_status
+    FROM matchups m
+    JOIN users hu ON hu.id = m.home_user_id
+    JOIN users au ON au.id = m.away_user_id
+    LEFT JOIN gameweeks gw ON gw.id = m.gameweek_id
+    WHERE m.league_id=$1 AND m.league_week=$2
+    ORDER BY m.home_user_id ASC
+  `, [id, parseInt(week)])
+
+  if (!matchups.length) return ok({ matchups: [] })
+
+  const gameweekId = matchups[0].gameweek_id
+  const gwStatus   = matchups[0].gw_status ?? 'DRAFT'
+  const picksOpen  = ['LOCKED','FINISHED','SETTLED'].includes(gwStatus)
+
+  // Fetch picks for all players in this week's matchups if visible
+  let picksMap = {}
+  if (picksOpen && gameweekId) {
+    const allUserIds = [...new Set(matchups.flatMap(m => [m.home_user_id, m.away_user_id]))]
+    const { rows: allPicks } = await pool.query(`
+      SELECT up.user_id, up.event_id, up.event_option_id, up.pick_status,
+             eo.label AS pick_label,
+             e.fixture_name, e.event_type, e.match_time
+      FROM user_picks up
+      JOIN event_options eo ON eo.id = up.event_option_id
+      JOIN events e ON e.id = up.event_id
+      WHERE up.gameweek_id=$1 AND up.user_id = ANY($2::uuid[])
+      ORDER BY e.match_time ASC
+    `, [gameweekId, allUserIds])
+    for (const p of allPicks) {
+      if (!picksMap[p.user_id]) picksMap[p.user_id] = []
+      picksMap[p.user_id].push(p)
+    }
+  }
+
+  const result = matchups.map(m => {
+    const isParticipant = m.home_user_id === user.userId || m.away_user_id === user.userId
+    const visible = isParticipant || picksOpen
+    return {
+      ...m,
+      isParticipant,
+      picksVisible: visible,
+      homePicks: visible ? (picksMap[m.home_user_id] ?? []) : [],
+      awayPicks:  visible ? (picksMap[m.away_user_id]  ?? []) : [],
+      homeCorrect: visible ? (picksMap[m.home_user_id] ?? []).filter(p => p.pick_status === 'won').length : null,
+      awayCorrect: visible ? (picksMap[m.away_user_id]  ?? []).filter(p => p.pick_status === 'won').length : null,
+    }
+  })
+
+  return ok({ matchups: result, gwStatus, picksVisible: picksOpen })
 }
 
 // ── PUT /leagues/{id}/members/{userId}/payment ────────────────────────────────

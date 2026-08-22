@@ -36,11 +36,24 @@ async function getMatchup(event, user) {
   `, [id])
   if (!matchup) return error(404, "Matchup not found")
 
-  if (matchup.home_user_id !== user.userId && matchup.away_user_id !== user.userId) {
-    return error(403, "Forbidden")
+  const isParticipant = matchup.home_user_id === user.userId || matchup.away_user_id === user.userId
+
+  // Non-participants can view if they're a member of the same league
+  if (!isParticipant) {
+    if (!matchup.league_id) return error(403, "Forbidden")
+    const mem = await pool.query(
+      "SELECT id FROM private_league_members WHERE league_id=$1 AND user_id=$2",
+      [matchup.league_id, user.userId]
+    )
+    if (!mem.rows.length) return error(403, "Forbidden")
   }
 
-  if (!matchup.gameweek_id) return ok({ ...matchup, homePicks: [], awayPicks: [] })
+  if (!matchup.gameweek_id) return ok({ ...matchup, homePicks: [], awayPicks: [], isParticipant })
+
+  // Only reveal picks once the gameweek is locked/settled — spectators can't see picks while open
+  const gwRes = await pool.query("SELECT status FROM gameweeks WHERE id=$1", [matchup.gameweek_id])
+  const gwStatus = gwRes.rows[0]?.status ?? 'DRAFT'
+  const picksVisible = isParticipant || ['LOCKED','FINISHED','SETTLED'].includes(gwStatus)
 
   const picksQuery = `
     SELECT up.event_id, up.event_option_id, up.pick_status,
@@ -53,8 +66,8 @@ async function getMatchup(event, user) {
     ORDER BY e.match_time ASC
   `
   const [homePicks, awayPicks] = await Promise.all([
-    pool.query(picksQuery, [matchup.home_user_id, matchup.gameweek_id]),
-    pool.query(picksQuery, [matchup.away_user_id, matchup.gameweek_id]),
+    picksVisible ? pool.query(picksQuery, [matchup.home_user_id, matchup.gameweek_id]) : { rows: [] },
+    picksVisible ? pool.query(picksQuery, [matchup.away_user_id, matchup.gameweek_id]) : { rows: [] },
   ])
 
   const homeCorrect = homePicks.rows.filter(p => p.pick_status === 'won').length
@@ -67,6 +80,9 @@ async function getMatchup(event, user) {
 
   return ok({
     ...matchup,
+    isParticipant,
+    picksVisible,
+    gwStatus,
     homeCorrect,
     awayCorrect,
     outlook,

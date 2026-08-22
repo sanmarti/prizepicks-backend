@@ -177,6 +177,12 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /leagues/{id}/calendar
             Method: GET
+        LeagueWeekMatchups:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/week/{week}/matchups
+            Method: GET
 
   # --- GAMEWEEKS ---
   GameweeksFunction:
