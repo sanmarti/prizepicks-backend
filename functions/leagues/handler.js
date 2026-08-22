@@ -179,23 +179,22 @@ async function joinLeague(event, user) {
 // ── GET /leagues/{id}/standings ───────────────────────────────────────────────
 async function getStandings(event, user) {
   const { id } = event.pathParameters
+  const allTime = event.queryStringParameters?.all_time === 'true'
   const pool = await getPool()
 
-  // Must be a member
   const mem = await pool.query(`
     SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
   `, [id, user.userId])
   if (mem.rows.length === 0) return error(403, 'Not a member')
 
-  // Get current (latest) period
   const { rows: [period] } = await pool.query(`
     SELECT * FROM private_league_periods WHERE league_id = $1 ORDER BY created_at DESC LIMIT 1
   `, [id])
 
-  // Build date filter: if period has start/end sprint IDs use their dates, else no filter
+  // Build date filter unless all_time requested
   let dateFilter = ''
   let dateParams = [id]
-  if (period?.start_matchweek_id || period?.end_matchweek_id) {
+  if (!allTime && (period?.start_matchweek_id || period?.end_matchweek_id)) {
     const { rows: [bounds] } = await pool.query(`
       SELECT MIN(start_date) AS from_dt, MAX(end_date) AS to_dt
       FROM sprints WHERE id IN ($1, $2)
@@ -213,13 +212,16 @@ async function getStandings(event, user) {
       COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) AS total_points,
       COALESCE(SUM(uge.correct_picks), 0) AS correct_picks,
       COUNT(DISTINCT uge.gameweek_id) AS gameweeks_played,
-      ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) DESC, u.display_name ASC) AS position
+      ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) DESC, u.display_name ASC) AS position,
+      d.name AS division_name
     FROM private_league_members m
     JOIN users u ON u.id = m.user_id
     LEFT JOIN user_gameweek_entries uge ON uge.user_id = m.user_id
     LEFT JOIN gameweeks g ON g.id = uge.gameweek_id ${dateFilter}
+    LEFT JOIN user_division_status uds ON uds.user_id = u.id
+    LEFT JOIN divisions d ON d.id = uds.division_id
     WHERE m.league_id = $1
-    GROUP BY u.id, u.display_name, u.avatar_url, m.has_paid
+    GROUP BY u.id, u.display_name, u.avatar_url, m.has_paid, d.name
     ORDER BY total_points DESC, u.display_name ASC
   `, dateParams)
 

@@ -661,8 +661,38 @@ async function getLeaderboard(event, user) {
   const qs = event.queryStringParameters || {}
   const divisionId = qs.division_id
   const sprintId   = qs.sprint_id
+  const allTime    = qs.all_time === 'true'
 
   const pool = await getPool()
+
+  // All-time: aggregate across all sprints
+  if (allTime) {
+    const { rows } = await pool.query(`
+      SELECT
+        u.id AS user_id, u.display_name, u.avatar_url,
+        COALESCE(SUM(usp.total_league_points), 0)::int   AS total_league_points,
+        COALESCE(SUM(usp.total_correct_picks), 0)::int   AS total_correct_picks,
+        COALESCE(SUM(usp.total_incorrect_picks), 0)::int AS total_incorrect_picks,
+        COALESCE(SUM(usp.perfect_weeks), 0)::int         AS perfect_weeks,
+        0::int AS energy_used, 0::int AS pending_picks, 0::int AS live_picks,
+        d.name AS division_name,
+        RANK() OVER (
+          ORDER BY COALESCE(SUM(usp.total_league_points),0) DESC,
+                   COALESCE(SUM(usp.total_correct_picks),0) DESC,
+                   u.display_name ASC
+        )::int AS rank,
+        COALESCE(SUM(usp.total_correct_picks), 0)::int   AS lifetime_correct,
+        COALESCE(SUM(usp.total_incorrect_picks), 0)::int AS lifetime_incorrect
+      FROM user_sprint_progress usp
+      JOIN users u ON u.id = usp.user_id AND u.role = 'user'
+      LEFT JOIN user_division_status uds ON uds.user_id = u.id
+      LEFT JOIN divisions d ON d.id = uds.division_id
+      GROUP BY u.id, u.display_name, u.avatar_url, d.name
+      ORDER BY total_league_points DESC, total_correct_picks DESC, u.display_name ASC
+      LIMIT 100
+    `)
+    return ok({ rows, division: null, sprint: null })
+  }
 
   // Active sprint if not specified
   let sid = sprintId
