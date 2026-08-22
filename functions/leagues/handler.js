@@ -323,7 +323,7 @@ async function submitLeaguePicks(event, user) {
   const { rows: [entry] } = await pool.query(`
     INSERT INTO user_gameweek_entries (user_id, gameweek_id)
     VALUES ($1, $2)
-    ON CONFLICT (user_id, gameweek_id) DO UPDATE SET updated_at = NOW()
+    ON CONFLICT (user_id, gameweek_id) DO UPDATE SET picks_submitted = EXCLUDED.picks_submitted
     RETURNING id
   `, [user.userId, matchup.gameweek_id])
 
