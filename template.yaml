@@ -159,6 +159,24 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /leagues/{id}/leave
             Method: DELETE
+        LeagueMatchup:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/matchup
+            Method: GET
+        LeaguePicksPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/picks
+            Method: POST
+        LeagueCalendar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /leagues/{id}/calendar
+            Method: GET
 
   # --- GAMEWEEKS ---
   GameweeksFunction:
@@ -741,6 +759,30 @@ Resources:
             ApiId: !Ref PrizePicksApi
             Path: /admin/private-leagues/{id}/periods/{periodId}/prizes
             Method: PUT
+        AdminLeagueGenerateCalendar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/generate-calendar
+            Method: POST
+        AdminLeaguePublish:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/publish
+            Method: POST
+        AdminLeagueStartWeek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/start-week
+            Method: POST
+        AdminLeagueSettleWeek:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref PrizePicksApi
+            Path: /admin/private-leagues/{id}/settle-week
+            Method: POST
 
   # --- LIFECYCLE (scheduled automation) ---
   LifecycleFunction:

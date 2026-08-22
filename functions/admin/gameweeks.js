@@ -159,65 +159,20 @@ async function publishGameweek(event) {
   const pool = await getPool()
 
   const gwResult = await pool.query(
-    "SELECT id, competition_id, week_number, sprint_id FROM gameweeks WHERE id=$1 AND status='DRAFT'",
+    "SELECT id, competition_id, week_number, year FROM gameweeks WHERE id=$1 AND status='DRAFT'",
     [gameweek_id]
   )
   if (!gwResult.rows.length) return error(404, "Gameweek not found or not DRAFT")
-  const { competition_id, week_number, sprint_id } = gwResult.rows[0]
+  const { competition_id, week_number, year } = gwResult.rows[0]
 
   await pool.query("UPDATE gameweeks SET status='PUBLISHED' WHERE id=$1", [gameweek_id])
 
-  // If this gameweek belongs to a sprint that is still in draft, auto-promote it to
-  // 'scheduled' so the glory handler (which queries live/scheduled sprints) can find it.
-  // The admin can still explicitly activate to 'live' later to initialise sprint progress.
-  let sprintAutoScheduled = false
-  if (sprint_id) {
-    const sprintRes = await pool.query(
-      "SELECT id, status FROM sprints WHERE id=$1", [sprint_id]
-    )
-    if (sprintRes.rows.length && ['draft', 'scheduled'].includes(sprintRes.rows[0].status)) {
-      await pool.query("UPDATE sprints SET status='live' WHERE id=$1", [sprint_id])
-      sprintAutoScheduled = true
-    }
-  }
-
-  // Generate matchups for EVERY active league in this competition (competition-based gameweeks only)
-  const leaguesResult = competition_id
-    ? await pool.query("SELECT id FROM leagues WHERE competition_id=$1 AND status='ACTIVE'", [competition_id])
-    : { rows: [] }
-
-  let totalMatchups = 0
-
-  for (const league of leaguesResult.rows) {
-    const members = (await pool.query(
-      "SELECT user_id FROM league_members WHERE league_id=$1 ORDER BY joined_at ASC",
-      [league.id]
-    )).rows.map(r => r.user_id)
-
-    const n = members.length
-    if (n < 2) continue
-
-    const offset  = (week_number - 1) % Math.max(1, n - 1)
-    const rotated = [members[0], ...members.slice(1).map((_, i) => members[1 + (i + offset) % (n - 1)])]
-
-    for (let i = 0; i < Math.floor(n / 2); i++) {
-      await pool.query(
-        `INSERT INTO matchups (id, gameweek_id, home_user_id, away_user_id, status)
-         VALUES ($1,$2,$3,$4,'PENDING')`,
-        [uuidv4(), gameweek_id, rotated[i], rotated[n - 1 - i]]
-      )
-      totalMatchups++
-    }
-  }
-
   // Send "picks are open" emails to all opted-in users
   const gwMeta = await pool.query(
-    `SELECT g.sprint_week, g.lock_time, s.name AS sprint_name
-     FROM gameweeks g JOIN sprints s ON s.id = g.sprint_id
-     WHERE g.id = $1`, [gameweek_id]
+    `SELECT week_number, year, lock_time FROM gameweeks WHERE id = $1`, [gameweek_id]
   )
   if (gwMeta.rows.length) {
-    const { sprint_week, lock_time, sprint_name } = gwMeta.rows[0]
+    const { week_number: wn, year: yr, lock_time } = gwMeta.rows[0]
     const compRes = await pool.query(
       `SELECT DISTINCT competition FROM events WHERE gameweek_id = $1 AND competition IS NOT NULL AND competition != '' ORDER BY competition`,
       [gameweek_id]
@@ -229,8 +184,8 @@ async function publishGameweek(event) {
     for (const u of users.rows) {
       const { subject, html } = picksOpenEmail({
         displayName:  u.display_name || u.email.split('@')[0],
-        sprintName:   sprint_name,
-        weekNumber:   sprint_week,
+        sprintName:   yr ? `Week ${wn} ${yr}` : `Week ${wn}`,
+        weekNumber:   wn,
         lockTime:     lock_time,
         competitions,
       })
@@ -243,10 +198,8 @@ async function publishGameweek(event) {
   return ok({
     published: true,
     gameweek_id,
-    sprint_id: sprint_id ?? null,
-    sprint_auto_scheduled: sprintAutoScheduled,
-    leagues_affected: leaguesResult.rows.length,
-    matchupsCreated: totalMatchups
+    week_number,
+    year: year ?? null,
   })
 }
 

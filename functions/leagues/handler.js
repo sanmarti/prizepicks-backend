@@ -1,6 +1,7 @@
 const { getPool } = require('../../shared/db')
 const { verifyToken, extractFromEvent } = require('../../shared/auth')
 const { ok, error, unauthorized } = require('../../shared/response')
+const { v4: uuidv4 } = require('uuid')
 
 exports.handler = async (event) => {
   const routeKey = event.routeKey
@@ -13,17 +14,17 @@ exports.handler = async (event) => {
   }
 
   try {
-    if (routeKey === 'GET /leagues')                           return await listMyLeagues(event, user)
-    if (routeKey === 'POST /leagues')                          return await createLeague(event, user)
-    if (routeKey === 'GET /leagues/{id}')                      return await getLeague(event, user)
-    if (routeKey === 'PUT /leagues/{id}')                      return await updateLeague(event, user)
-    if (routeKey === 'POST /leagues/join/{code}')              return await joinLeague(event, user)
-    if (routeKey === 'GET /leagues/{id}/standings')            return await getStandings(event, user)
-    if (routeKey === 'POST /leagues/{id}/periods')             return await createPeriod(event, user)
-    if (routeKey === 'PUT /leagues/{id}/periods/{periodId}')   return await updatePeriod(event, user)
-    if (routeKey === 'GET /leagues/sprints')                   return await listSprints(event, user)
-    if (routeKey === 'PUT /leagues/{id}/members/{userId}/payment') return await togglePayment(event, user)
-    if (routeKey === 'DELETE /leagues/{id}/leave')                return await leaveLeague(event, user)
+    if (routeKey === 'GET /leagues')                                return await listMyLeagues(event, user)
+    if (routeKey === 'POST /leagues')                               return await createLeague(event, user)
+    if (routeKey === 'GET /leagues/{id}')                           return await getLeague(event, user)
+    if (routeKey === 'PUT /leagues/{id}')                           return await updateLeague(event, user)
+    if (routeKey === 'POST /leagues/join/{code}')                   return await joinLeague(event, user)
+    if (routeKey === 'GET /leagues/{id}/standings')                 return await getStandings(event, user)
+    if (routeKey === 'GET /leagues/{id}/matchup')                   return await getMatchupForUser(event, user)
+    if (routeKey === 'POST /leagues/{id}/picks')                    return await submitLeaguePicks(event, user)
+    if (routeKey === 'GET /leagues/{id}/calendar')                  return await getLeagueCalendar(event, user)
+    if (routeKey === 'PUT /leagues/{id}/members/{userId}/payment')  return await togglePayment(event, user)
+    if (routeKey === 'DELETE /leagues/{id}/leave')                  return await leaveLeague(event, user)
     return error(404, 'Not found')
   } catch (err) {
     console.error(err)
@@ -37,26 +38,13 @@ async function listMyLeagues(event, user) {
   const { rows } = await pool.query(`
     SELECT
       l.id, l.name, l.invite_code, l.image_url, l.entry_fee_euros, l.created_at,
-      m.role, m.has_paid,
+      l.status, l.current_week, l.total_weeks, l.season_name,
+      m.role, m.has_paid, m.league_points,
       (SELECT COUNT(*) FROM private_league_members WHERE league_id = l.id) AS member_count,
-      (SELECT row_to_json(p) FROM (
-        SELECT id, name, status, created_at
-        FROM private_league_periods
-        WHERE league_id = l.id
-        ORDER BY created_at DESC LIMIT 1
-      ) p) AS current_period,
       (
         SELECT COUNT(*) + 1
         FROM private_league_members m2
-        LEFT JOIN (
-          SELECT user_id, COALESCE(SUM(league_points + COALESCE(perfect_week_bonus, 0)), 0) AS pts
-          FROM user_gameweek_entries GROUP BY user_id
-        ) agg ON agg.user_id = m2.user_id
-        WHERE m2.league_id = l.id
-          AND COALESCE(agg.pts, 0) > (
-            SELECT COALESCE(SUM(league_points + COALESCE(perfect_week_bonus, 0)), 0)
-            FROM user_gameweek_entries WHERE user_id = $1
-          )
+        WHERE m2.league_id = l.id AND m2.league_points > m.league_points
       ) AS my_position
     FROM private_leagues l
     JOIN private_league_members m ON m.league_id = l.id AND m.user_id = $1
@@ -82,7 +70,6 @@ async function createLeague(event, user) {
 
   const league = rows[0]
 
-  // Creator is admin member
   await pool.query(`
     INSERT INTO private_league_members (league_id, user_id, role)
     VALUES ($1, $2, 'admin')
@@ -96,7 +83,6 @@ async function getLeague(event, user) {
   const { id } = event.pathParameters
   const pool = await getPool()
 
-  // Must be a member
   const membership = await pool.query(`
     SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
   `, [id, user.userId])
@@ -108,24 +94,20 @@ async function getLeague(event, user) {
   `, [id])
   if (!league) return error(404, 'League not found')
 
-  const { rows: periods } = await pool.query(`
-    SELECT * FROM private_league_periods WHERE league_id = $1 ORDER BY created_at DESC
-  `, [id])
-
   const { rows: members } = await pool.query(`
     SELECT
       m.user_id, m.role, m.has_paid, m.joined_at,
+      m.league_points, m.wins, m.draws, m.losses, m.goals_for, m.goals_against, m.played,
       u.display_name, u.avatar_url, u.email
     FROM private_league_members m
     JOIN users u ON u.id = m.user_id
     WHERE m.league_id = $1
-    ORDER BY m.role DESC, m.joined_at ASC
+    ORDER BY m.league_points DESC, m.role DESC, m.joined_at ASC
   `, [id])
 
   return ok({
     ...league,
     my_role: membership.rows[0].role,
-    periods,
     members,
   })
 }
@@ -160,9 +142,12 @@ async function joinLeague(event, user) {
   const pool = await getPool()
 
   const { rows: [league] } = await pool.query(`
-    SELECT id, name FROM private_leagues WHERE invite_code = $1
+    SELECT id, name, status FROM private_leagues WHERE invite_code = $1
   `, [code.toUpperCase()])
   if (!league) return error(404, 'Invalid invite code')
+  if (league.status === 'active' || league.status === 'completed') {
+    return error(409, 'This league has already started and is not accepting new members')
+  }
 
   const existing = await pool.query(`
     SELECT id FROM private_league_members WHERE league_id = $1 AND user_id = $2
@@ -179,7 +164,6 @@ async function joinLeague(event, user) {
 // ── GET /leagues/{id}/standings ───────────────────────────────────────────────
 async function getStandings(event, user) {
   const { id } = event.pathParameters
-  const allTime = event.queryStringParameters?.all_time === 'true'
   const pool = await getPool()
 
   const mem = await pool.query(`
@@ -187,117 +171,217 @@ async function getStandings(event, user) {
   `, [id, user.userId])
   if (mem.rows.length === 0) return error(403, 'Not a member')
 
-  const { rows: [period] } = await pool.query(`
-    SELECT * FROM private_league_periods WHERE league_id = $1 ORDER BY created_at DESC LIMIT 1
-  `, [id])
-
-  // Build date filter unless all_time requested
-  let dateFilter = ''
-  let dateParams = [id]
-  if (!allTime && (period?.start_matchweek_id || period?.end_matchweek_id)) {
-    const { rows: [bounds] } = await pool.query(`
-      SELECT MIN(start_date) AS from_dt, MAX(end_date) AS to_dt
-      FROM sprints WHERE id IN ($1, $2)
-    `, [period.start_matchweek_id || period.end_matchweek_id, period.end_matchweek_id || period.start_matchweek_id])
-    if (bounds?.from_dt) {
-      dateFilter = `AND g.start_date >= $2 AND g.end_date <= $3`
-      dateParams = [id, bounds.from_dt, bounds.to_dt]
-    }
-  }
-
   const { rows } = await pool.query(`
     SELECT
       u.id AS user_id, u.display_name, u.avatar_url,
-      m.has_paid,
-      COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) AS total_points,
-      COALESCE(SUM(uge.correct_picks), 0) AS correct_picks,
-      COUNT(DISTINCT uge.gameweek_id) AS gameweeks_played,
-      ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(uge.league_points + COALESCE(uge.perfect_week_bonus, 0)), 0) DESC, u.display_name ASC) AS position,
+      m.role, m.has_paid,
+      m.league_points, m.wins, m.draws, m.losses, m.goals_for, m.goals_against, m.played,
+      (m.goals_for - m.goals_against) AS goal_diff,
+      ROW_NUMBER() OVER (
+        ORDER BY m.league_points DESC,
+                 (m.goals_for - m.goals_against) DESC,
+                 m.goals_for DESC,
+                 u.display_name ASC
+      ) AS position,
       d.name AS division_name
     FROM private_league_members m
     JOIN users u ON u.id = m.user_id
-    LEFT JOIN user_gameweek_entries uge ON uge.user_id = m.user_id
-    LEFT JOIN gameweeks g ON g.id = uge.gameweek_id ${dateFilter}
     LEFT JOIN user_division_status uds ON uds.user_id = u.id
     LEFT JOIN divisions d ON d.id = uds.division_id
     WHERE m.league_id = $1
-    GROUP BY u.id, u.display_name, u.avatar_url, m.has_paid, d.name
-    ORDER BY total_points DESC, u.display_name ASC
-  `, dateParams)
+    ORDER BY position
+  `, [id])
 
-  return ok({ period: period || null, standings: rows })
+  return ok({ standings: rows })
 }
 
-// ── POST /leagues/{id}/periods ────────────────────────────────────────────────
-async function createPeriod(event, user) {
+// ── GET /leagues/{id}/matchup ─────────────────────────────────────────────────
+async function getMatchupForUser(event, user) {
   const { id } = event.pathParameters
-  const body = JSON.parse(event.body || '{}')
   const pool = await getPool()
 
   const mem = await pool.query(`
     SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
   `, [id, user.userId])
-  if (mem.rows.length === 0 || mem.rows[0].role !== 'admin') return error(403, 'Admin only')
+  if (mem.rows.length === 0) return error(403, 'Not a member')
 
-  const { name, start_matchweek_id, end_matchweek_id, prize_config } = body
-  if (!name?.trim()) return error(400, 'name is required')
+  const { rows: [league] } = await pool.query(`
+    SELECT current_week, total_weeks, status FROM private_leagues WHERE id = $1
+  `, [id])
+  if (!league || league.status === 'draft') return ok({ matchup: null })
 
-  // Close any live periods first
-  await pool.query(`
-    UPDATE private_league_periods SET status = 'completed' WHERE league_id = $1 AND status = 'live'
+  const { rows: [matchup] } = await pool.query(`
+    SELECT m.*,
+      hu.display_name AS home_display_name, hu.avatar_url AS home_avatar,
+      au.display_name AS away_display_name, au.avatar_url AS away_avatar
+    FROM matchups m
+    JOIN users hu ON hu.id = m.home_user_id
+    JOIN users au ON au.id = m.away_user_id
+    WHERE m.league_id = $1
+      AND m.league_week = $2
+      AND (m.home_user_id = $3 OR m.away_user_id = $3)
+  `, [id, league.current_week, user.userId])
+
+  if (!matchup) return ok({ matchup: null, current_week: league.current_week })
+
+  const isHome = matchup.home_user_id === user.userId
+  const myUserId   = user.userId
+  const rivalId    = isHome ? matchup.away_user_id : matchup.home_user_id
+  const rivalName  = isHome ? matchup.away_display_name : matchup.home_display_name
+  const rivalAvatar = isHome ? matchup.away_avatar : matchup.home_avatar
+
+  let gameweek = null
+  let events = []
+  let myPicks = []
+  let rivalPicks = []
+
+  if (matchup.gameweek_id) {
+    const gwRes = await pool.query(`
+      SELECT gw.id, gw.week_number, gw.year, gw.lock_time, gw.reveal_time, gw.status
+      FROM gameweeks gw WHERE gw.id = $1
+    `, [matchup.gameweek_id])
+    gameweek = gwRes.rows[0] || null
+
+    const evRes = await pool.query(`
+      SELECT e.*, array_agg(
+        json_build_object('id', eo.id, 'label', eo.label, 'outcome', eo.outcome)
+        ORDER BY eo.id
+      ) AS options
+      FROM events e
+      LEFT JOIN event_options eo ON eo.event_id = e.id
+      WHERE e.gameweek_id = $1
+      GROUP BY e.id
+      ORDER BY e.match_time ASC
+    `, [matchup.gameweek_id])
+    events = evRes.rows
+
+    const picksQuery = `
+      SELECT up.event_id, up.event_option_id, up.pick_status, eo.label AS pick_label
+      FROM user_picks up
+      JOIN event_options eo ON eo.id = up.event_option_id
+      WHERE up.user_id = $1 AND up.gameweek_id = $2
+    `
+    const [myRes, rivalRes] = await Promise.all([
+      pool.query(picksQuery, [myUserId, matchup.gameweek_id]),
+      pool.query(picksQuery, [rivalId, matchup.gameweek_id]),
+    ])
+    myPicks    = myRes.rows
+    rivalPicks = rivalRes.rows
+  }
+
+  const myCorrect    = myPicks.filter(p => p.pick_status === 'won').length
+  const rivalCorrect = rivalPicks.filter(p => p.pick_status === 'won').length
+  const outlook = myCorrect > rivalCorrect ? 'Winning' : myCorrect < rivalCorrect ? 'Losing' : 'Drawing'
+
+  return ok({
+    matchup,
+    gameweek,
+    events,
+    my_picks:    myPicks,
+    rival_picks: rivalPicks,
+    rival: { user_id: rivalId, display_name: rivalName, avatar_url: rivalAvatar },
+    my_correct:    myCorrect,
+    rival_correct: rivalCorrect,
+    outlook,
+    current_week:  league.current_week,
+    total_weeks:   league.total_weeks,
+  })
+}
+
+// ── POST /leagues/{id}/picks ──────────────────────────────────────────────────
+async function submitLeaguePicks(event, user) {
+  const { id } = event.pathParameters
+  const { picks } = JSON.parse(event.body || '{}')
+  if (!Array.isArray(picks) || picks.length === 0) return error(400, 'picks array required')
+
+  const pool = await getPool()
+
+  const mem = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (mem.rows.length === 0) return error(403, 'Not a member')
+
+  const { rows: [league] } = await pool.query(`
+    SELECT current_week FROM private_leagues WHERE id = $1
   `, [id])
 
-  const { rows: [period] } = await pool.query(`
-    INSERT INTO private_league_periods (league_id, name, start_matchweek_id, end_matchweek_id, status, prize_config)
-    VALUES ($1, $2, $3, $4, 'live', $5)
-    RETURNING *
-  `, [id, name.trim(), start_matchweek_id || null, end_matchweek_id || null, prize_config ? JSON.stringify(prize_config) : '{}'])
+  const { rows: [matchup] } = await pool.query(`
+    SELECT * FROM matchups
+    WHERE league_id = $1 AND league_week = $2
+      AND (home_user_id = $3 OR away_user_id = $3)
+  `, [id, league.current_week, user.userId])
 
-  return ok(period, 201)
+  if (!matchup) return error(404, 'No active matchup this week')
+  if (!matchup.gameweek_id) return error(400, 'Gameweek not yet linked to this matchup')
+
+  const { rows: [gw] } = await pool.query(`
+    SELECT status FROM gameweeks WHERE id = $1
+  `, [matchup.gameweek_id])
+  if (!gw || gw.status !== 'PUBLISHED') return error(400, 'Picks are not open for this gameweek')
+
+  // Upsert the entry record
+  const { rows: [entry] } = await pool.query(`
+    INSERT INTO user_gameweek_entries (user_id, gameweek_id)
+    VALUES ($1, $2)
+    ON CONFLICT (user_id, gameweek_id) DO UPDATE SET updated_at = NOW()
+    RETURNING id
+  `, [user.userId, matchup.gameweek_id])
+
+  // Upsert each pick
+  for (const pick of picks) {
+    if (!pick.event_id || !pick.event_option_id) continue
+    await pool.query(`
+      INSERT INTO user_picks (id, entry_id, user_id, gameweek_id, event_id, event_option_id, pick_status)
+      VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+      ON CONFLICT (entry_id, event_id) DO UPDATE
+        SET event_option_id = EXCLUDED.event_option_id,
+            pick_status     = 'pending'
+    `, [uuidv4(), entry.id, user.userId, matchup.gameweek_id, pick.event_id, pick.event_option_id])
+  }
+
+  await pool.query(`
+    UPDATE user_gameweek_entries
+    SET picks_submitted = $1
+    WHERE id = $2
+  `, [picks.length, entry.id])
+
+  return ok({ submitted: true, picks_count: picks.length })
 }
 
-// ── GET /leagues/sprints ──────────────────────────────────────────────────────
-async function listSprints(event, user) {
+// ── GET /leagues/{id}/calendar ────────────────────────────────────────────────
+async function getLeagueCalendar(event, user) {
+  const { id } = event.pathParameters
   const pool = await getPool()
+
+  const mem = await pool.query(`
+    SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2
+  `, [id, user.userId])
+  if (mem.rows.length === 0) return error(403, 'Not a member')
+
   const { rows } = await pool.query(`
-    SELECT id, name, status, start_date, end_date
-    FROM sprints
-    WHERE end_date >= NOW() - INTERVAL '8 weeks'
-    ORDER BY start_date ASC
-    LIMIT 20
-  `)
-  return ok(rows)
-}
+    SELECT
+      m.id, m.league_week, m.status, m.gameweek_id,
+      m.home_user_id, hu.display_name AS home_name, hu.avatar_url AS home_avatar,
+      m.away_user_id, au.display_name AS away_name, au.avatar_url AS away_avatar,
+      m.home_score, m.away_score, m.home_league_points, m.away_league_points,
+      gw.week_number, gw.year, gw.lock_time
+    FROM matchups m
+    JOIN users hu ON hu.id = m.home_user_id
+    JOIN users au ON au.id = m.away_user_id
+    LEFT JOIN gameweeks gw ON gw.id = m.gameweek_id
+    WHERE m.league_id = $1
+    ORDER BY m.league_week ASC, m.home_user_id ASC
+  `, [id])
 
-// ── PUT /leagues/{id}/periods/{periodId} ──────────────────────────────────────
-async function updatePeriod(event, user) {
-  const { id, periodId } = event.pathParameters
-  const { name, start_sprint_id, end_sprint_id } = JSON.parse(event.body || '{}')
-  const pool = await getPool()
+  // Group by week
+  const calendar = {}
+  for (const row of rows) {
+    const w = row.league_week
+    if (!calendar[w]) calendar[w] = []
+    calendar[w].push(row)
+  }
 
-  const mem = await pool.query(
-    'SELECT role FROM private_league_members WHERE league_id = $1 AND user_id = $2',
-    [id, user.userId]
-  )
-  if (!mem.rows.length || mem.rows[0].role !== 'admin') return error(403, 'Admin only')
-
-  const { rows: [period] } = await pool.query(
-    'SELECT id FROM private_league_periods WHERE id = $1 AND league_id = $2',
-    [periodId, id]
-  )
-  if (!period) return error(404, 'Period not found')
-
-  // Store sprint IDs directly in the matchweek columns (now UUID type)
-  await pool.query(
-    `UPDATE private_league_periods
-     SET name               = COALESCE($1, name),
-         start_matchweek_id = COALESCE($2::uuid, start_matchweek_id),
-         end_matchweek_id   = COALESCE($3::uuid, end_matchweek_id)
-     WHERE id = $4`,
-    [name?.trim() || null, start_sprint_id || null, end_sprint_id || null, periodId]
-  )
-
-  return ok({ updated: true })
+  return ok({ calendar })
 }
 
 // ── PUT /leagues/{id}/members/{userId}/payment ────────────────────────────────
